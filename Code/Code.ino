@@ -93,38 +93,6 @@ void setup() {
 
 void loop() {
 
-  // switch flow on once temp hits setpoint
-  if (states == B101011 && UI_loc[3] == 0 && UI_loc[2] > 0 && UI_loc[0] == 1 && abs(CV[0] - setpoint[0]) < 1) { // If the system is cooling to start a run, is not paused, and the system has reached temp setpoint
-    // Read all the sensor data to log once
-    read_GPS();
-    
-    data_file = SD.open(String(F("/data/sample")) + String(sample_num) + String(F(".csv")), FILE_WRITE); // Open a new data file for writing
-    
-    // Write log_once_data to data file
-    // Construct a comma-separated string containing the sensor data
-    String sensor_data = "";
-    for (byte data_sel = 0; data_sel < sizeof(log_once_data); data_sel++) {
-      data_string += String(log_once_data[data_sel]);
-      if (data_sel < sizeof(log_once_data)-1) {
-        data_string += ",";
-      }
-    }
-    data_file.println(data_string); // Write sensor data to current data file
-    
-    states = B111111; // Start flow and recording data
-  }
-
-  // stop run once total flow reaches configured value
-  if (states == B111111 && UI_loc[3] == 0 && UI_loc[2] > 0 && UI_loc[0] == 1 && flow_tot >= flow_tot_setpoint) { // If the system is currently sampling, is not paused, and the system has reached the total flow setpoint
-    states = B001011;
-    data_file.close();
-    sample_num++; // Increment the collection counter
-    flow_tot = 0; // Reset the flow rate integration
-    UI_loc[3] = 0;
-    UI_loc[2] = 0;
-    UI_loc[1] = 0;
-  }
-
   // TODO call flush() on the data file occasionally
   
   // TODO screen updates based on current state
@@ -135,7 +103,7 @@ void loop() {
   switch (UI_loc[0]) {
   case 1:
     if (UI_loc[1] == 0) { // "Programs" is selected in top list
-      if (bitRead(flags, 0)) {
+      if (bitRead(flags, 0)) { // Move into program list and open the first program file
         UI_loc[1] = 1;
         prgm_dir = SD.open(F("/programs")); // Opens the programs directory on the SD card.
         prgm_file = prgm_dir.openNextFile();
@@ -147,7 +115,7 @@ void loop() {
       }
     }
     else if (!prgm_file) { // "Return" is selected in program list
-      if (bitRead(flags, 0)) {
+      if (bitRead(flags, 0)) { // Move back to top list
         UI_loc[1] = 0;
         prgm_file.close();
         prgm_dir.close();
@@ -162,7 +130,7 @@ void loop() {
     }
     else {
       if (UI_loc[2] == 0) { // A program is selected in program list
-        if (bitRead(flags, 0)) {
+        if (bitRead(flags, 0)) { // Read the program, set the run state bit, and move into run status list
           // read program file
           String setting_str;
           byte setting_sel = 0;
@@ -196,21 +164,21 @@ void loop() {
       }
       else {
         switch (UI_loc[3]) {
-        case 0:
-          if (bitRead(flags, 0)) {
+        case 0: // A run status display is selected in run status list
+          if (bitRead(flags, 0)) { // Clear the flow control and data log bits, stop flow, and move into paused run list
             states = B101011;
             MV[3] = 0;
             UI_loc[3] = 1;
             bitClear(flags, 0);
           }
           switch (UI_loc[2]) {
-          case 1: // A run status display is selected in run status list
+          case 1: // Run status display 1 is selected in run status list
             if (bitRead(flags, 1)) { // Cycle to next run status display in run status list
               UI_loc[2]++;
               bitClear(flags, 1);
             }
             break;
-          case 2: // A run status display is selected in run status list
+          case 2: // Run status display 2 is selected in run status list
             if (bitRead(flags, 1)) { // Cycle to next run status display in run status list
               UI_loc[2]++;
               bitClear(flags, 1);
@@ -223,9 +191,34 @@ void loop() {
             }
             break;
           }
+          if (states == B111111 && flow_tot >= setpoint[ctrlr_num]) { // If the system is currently sampling, is not paused, and has reached the total flow setpoint, stop run once total flow reaches configured value
+            states = B001011;
+            data_file.close();
+            sample_num++; // Increment the collection counter
+            flow_tot = 0; // Reset the flow rate integration
+            UI_loc[3] = 0;
+            UI_loc[2] = 0;
+            UI_loc[1] = 0;
+          }
+          else if (states == B101011 && abs(CV[0] - setpoint[0]) < 1) { // If the system is cooling to start flow, is not paused, and has reached temp setpoint (to within one degree), switch flow on once temp hits setpoint
+            // Read all the sensor data to log once
+            read_GPS();
+            data_file = SD.open(String(F("/data/sample")) + String(sample_num) + String(F(".csv")), FILE_WRITE); // Open a new data file for writing
+            // Write log_once_data to data file
+            // Construct a comma-separated string containing the sensor data
+            String sensor_data = "*"; // Starred data lines indicate they contain log_once_data
+            for (byte data_sel = 0; data_sel < sizeof(log_once_data); data_sel++) {
+              data_string += String(log_once_data[data_sel]);
+              if (data_sel < sizeof(log_once_data)-1) {
+                data_string += ",";
+              }
+            }
+            data_file.println(data_string + "\n"); // Write sensor data to current data file
+            states = B111111; // Start flow and recording data
+          }
           break;
         case 1: // "Finish" is selected in paused run list
-          if (bitRead(flags, 0)) {
+          if (bitRead(flags, 0)) { // Clear the run state bit, increment the sample counter, close the data file, and move back to top list
             states = B001011;
             sample_num++;
             data_file.close();
@@ -240,8 +233,7 @@ void loop() {
           }
           break;
         case 2: // "Resume" is selected in paused run list
-          if (bitRead(flags, 0)) {
-            states = B111111;
+          if (bitRead(flags, 0)) { // Move back to run status list to continue flow. The flow control and data log bits will be set once the temp setpoint is reached (may be on the next loop if paused during flow), and the log_once_data will be written again.
             UI_loc[3] = 0;
             bitClear(flags, 0);
           }
@@ -256,7 +248,7 @@ void loop() {
     break;
   case 2:
     if (UI_loc[1] == 0) { // "Status" is selected in top list
-      if (bitRead(flags, 0)) {
+      if (bitRead(flags, 0)) { // Move into status list
         UI_loc[1] = 1;
         bitClear(flags, 0);
       }
@@ -265,20 +257,20 @@ void loop() {
         bitClear(flags, 1);
       }
     }
-    else {
-      if (bitRead(flags, 0)) {
+    else { // A status display is selected in status list
+      if (bitRead(flags, 0)) { // Move back to top list
         UI_loc[1] = 0;
         UI_loc[0] = 1;
         bitClear(flags, 1);
       }
       switch (UI_loc[1]) {
-      case 1: // A status display is selected in status list
+      case 1: // Status display 1 is selected in status list
         if (bitRead(flags, 1)) { // Cycle to next status display in status list
           UI_loc[1]++;
           bitClear(flags, 1);
         }
         break;
-      case 2: // A status display is selected in status list
+      case 2: // Status display 2 is selected in status list
         if (bitRead(flags, 1)) { // Cycle to next status display in status list
           UI_loc[1]++;
           bitClear(flags, 1);
@@ -351,11 +343,141 @@ void timer_ISR() {
           data_string += ",";
         }
       }
-      data_file.println(data_string); // Write sensor data to current data file
+      data_file.println(data_string + "\n"); // Write sensor data to current data file
     }
   }
 }
 
+// Interrupt for "Select" button
+void select_ISR() {
+  bitSet(flags, 0);
+}
+
+// Interrupt for "Cycle" button
+void cycle_ISR() {
+  bitSet(flags, 1);
+}
+
+// Functions ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+// Reads the sensor corresponding to the selected control loop and returns a value with the specified units: sccm currently
+float read_sensor(byte selector) {
+  
+  float value;
+  switch (selector) {
+    case 0: // Internal temp control
+      // TODO
+      break;
+    case 1: // Heatsink temp control
+       // TODO
+       // read temp difference between ambient air and heatsink base
+       //value = (heatsink temp) - log_data[0]
+      break;
+    case 2: // Flow control
+      Wire.requestFrom(0x49, 2);    // request 2 bytes from airflow sensor (address 0x49)
+
+      // Read the two bytes into a 16-bit datatype
+      short dout_code; // Okay to use a signed datatype here since the data is only 14-bit
+      dout_code = ((short)Wire.read()) << 8;
+      dout_code += (short)Wire.read();
+      value = (((float)dout_code/16383.0 - 0.5)/0.4)*200.0; // Multiply at end by full-scale flow (200 sccm I think for this sensor)
+      break;
+  }
+  return value;
+}
+
+void read_temphumidity() {
+  // read into log_data[1:2]
+}
+
+void read_pressure() {
+  // read into log_data[2]
+}
+
+void read_GPS() {
+  // read into log_once_data
+}
+
+void read_battery() {
+  // read into monitor_data
+}
+
+byte start_flow_sensor() {
+  
+  // Upon data requests, the airflow sensor will reply with zeros until it has initialized. Then it sends its serial number on the first two data requests afterward.
+  Wire.requestFrom(0x49, 2);    // request 2 bytes from airflow sensor (address 0x49)
+  byte c[2];
+  c[0] = Wire.read();
+  c[1] = Wire.read();
+
+  // If the serial number was received on the last request, print it and read/print the rest of the serial number to prepare the device for receiving real data
+  if (c[0] != 0) {
+    Wire.requestFrom(0x49, 2);
+    Serial.print(F("Flow Sensor Serial Number: "));
+    Serial.print(c[0], HEX);
+    Serial.print(c[1], HEX);
+    c[0] = Wire.read();
+    c[1] = Wire.read();
+    Serial.print(c[0], HEX);
+    Serial.println(c[1], HEX);
+    return 0;
+  }
+  return 1;
+}
+
+byte num_files(File dir) {
+
+  byte num = 0;
+  while (true) {
+    File dirfile = dir.openNextFile();
+    if (!dirfile) {
+      break;
+    }
+    if (!dirfile.isDirectory()) {
+      num++;
+    }
+    dirfile.close();
+  }
+  return num;
+}
+
+// Loop state switch
+/*
+switch (states) {
+  case B000000: // default state
+    break;
+  case B001011: // controlling temperatures
+    break;
+  case B101011: // controlling tempuratures during a run
+    break;
+  case B111011: // controlling temperatures and recording data during a run
+    break;
+  case B111111: // controlling temperatures and flow and recording data during a run
+    break;
+  default: // Undefined state; move back to default state
+    states = B000000;
+    break;
+}
+*/
+
+// Alternate program reading functions
+/*for (byte setting_sel = 0; setting_sel < sizeof(setpoint); setting_sel++) {
+  String setting_str;
+  char read_char = prgm_file.read();
+  while (read_char != '\n' && prgm_file.available > 0) {
+    setting_str += read_char;
+    read_char = prgm_file.read();
+  }
+  setpoint[setting_sel] = setting_str.toFloat();
+}*/
+/*for (byte set_sel = 0; set_sel < 4; set_sel++) { // for each setpoint in the setpoints variable, read the corresponding float from the program file
+  for (byte bit_sel = 0; bit_sel < 32; bit_sel += 8) {
+    *(setpoint[set_sel] + bit_sel) = prgm_file.read(); // do the pointer math here to write a byte at consecutive positions pointed to by the float 
+  }
+}*/
+
+// Old button interrupts
+/*
 // Interrupt for "Cycle" button
 void cycle_ISR() {
   switch (UI_loc[0]) {
@@ -483,121 +605,38 @@ void select_ISR() {
       break;
   }
 }
-
-// Functions ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-// Reads the sensor corresponding to the selected control loop and returns a value with the specified units: sccm currently
-float read_sensor(byte selector) {
-  
-  float value;
-  switch (selector) {
-    case 0: // Internal temp control
-      // TODO
-      break;
-    case 1: // Heatsink temp control
-       // TODO
-       // read temp difference between ambient air and heatsink base
-       value = (heatsink temp) - log_data[0]
-      break;
-    case 2: // Flow control
-      Wire.requestFrom(0x49, 2);    // request 2 bytes from airflow sensor (address 0x49)
-
-      // Read the two bytes into a 16-bit datatype
-      short dout_code; // Okay to use a signed datatype here since the data is only 14-bit
-      dout_code = ((short)Wire.read()) << 8;
-      dout_code += (short)Wire.read();
-      value = (((float)dout_code/16383.0 - 0.5)/0.4)*200.0; // Multiply at end by full-scale flow (200 sccm I think for this sensor)
-      break;
-  }
-  return value;
-}
-
-void read_temphumidity() {
-  // read into log_data[1:2]
-}
-
-void read_pressure() {
-  // read into log_data[2]
-}
-
-void read_GPS() {
-  // read into log_once_data
-}
-
-void read_battery() {
-  // read into monitor_data
-}
-
-byte start_flow_sensor() {
-  
-  // Upon data requests, the airflow sensor will reply with zeros until it has initialized. Then it sends its serial number on the first two data requests afterward.
-  Wire.requestFrom(0x49, 2);    // request 2 bytes from airflow sensor (address 0x49)
-  byte c[2];
-  c[0] = Wire.read();
-  c[1] = Wire.read();
-
-  // If the serial number was received on the last request, print it and read/print the rest of the serial number to prepare the device for receiving real data
-  if (c[0] != 0) {
-    Wire.requestFrom(0x49, 2);
-    Serial.print(F("Flow Sensor Serial Number: "));
-    Serial.print(c[0], HEX);
-    Serial.print(c[1], HEX);
-    c[0] = Wire.read();
-    c[1] = Wire.read();
-    Serial.print(c[0], HEX);
-    Serial.println(c[1], HEX);
-    return 0;
-  }
-  return 1;
-}
-
-byte num_files(File dir) {
-
-  byte num = 0;
-  while (true) {
-    File dirfile = dir.openNextFile();
-    if (!dirfile) {
-      break;
-    }
-    if (!dirfile.isDirectory()) {
-      num++;
-    }
-    dirfile.close();
-  }
-  return num;
-}
-
-// Loop state switch
+*/
+// Old state change monitors
 /*
-switch (states) {
-  case B000000: // default state
-    break;
-  case B001011: // controlling temperatures
-    break;
-  case B101011: // controlling tempuratures during a run
-    break;
-  case B111011: // controlling temperatures and recording data during a run
-    break;
-  case B111111: // controlling temperatures and flow and recording data during a run
-    break;
-  default: // Undefined state; move back to default state
-    states = B000000;
-    break;
+// switch flow on once temp hits setpoint
+if (states == B101011 && UI_loc[3] == 0 && UI_loc[2] > 0 && UI_loc[0] == 1 && abs(CV[0] - setpoint[0]) < 1) { // If the system is cooling to start a run, is not paused, and the system has reached temp setpoint
+  // Read all the sensor data to log once
+  read_GPS();
+  
+  data_file = SD.open(String(F("/data/sample")) + String(sample_num) + String(F(".csv")), FILE_WRITE); // Open a new data file for writing
+  
+  // Write log_once_data to data file
+  // Construct a comma-separated string containing the sensor data
+  String sensor_data = "";
+  for (byte data_sel = 0; data_sel < sizeof(log_once_data); data_sel++) {
+    data_string += String(log_once_data[data_sel]);
+    if (data_sel < sizeof(log_once_data)-1) {
+      data_string += ",";
+    }
+  }
+  data_file.println(data_string + "\n"); // Write sensor data to current data file
+  
+  states = B111111; // Start flow and recording data
+}
+
+// stop run once total flow reaches configured value
+if (states == B111111 && UI_loc[3] == 0 && UI_loc[2] > 0 && UI_loc[0] == 1 && flow_tot >= flow_tot_setpoint) { // If the system is currently sampling, is not paused, and the system has reached the total flow setpoint
+  states = B001011;
+  data_file.close();
+  sample_num++; // Increment the collection counter
+  flow_tot = 0; // Reset the flow rate integration
+  UI_loc[3] = 0;
+  UI_loc[2] = 0;
+  UI_loc[1] = 0;
 }
 */
-
-// Alternate program reading functions
-/*for (byte setting_sel = 0; setting_sel < sizeof(setpoint); setting_sel++) {
-  String setting_str;
-  char read_char = prgm_file.read();
-  while (read_char != '\n' && prgm_file.available > 0) {
-    setting_str += read_char;
-    read_char = prgm_file.read();
-  }
-  setpoint[setting_sel] = setting_str.toFloat();
-}*/
-/*for (byte set_sel = 0; set_sel < 4; set_sel++) { // for each setpoint in the setpoints variable, read the corresponding float from the program file
-  for (byte bit_sel = 0; bit_sel < 32; bit_sel += 8) {
-    *(setpoint[set_sel] + bit_sel) = prgm_file.read(); // do the pointer math here to write a byte at consecutive positions pointed to by the float 
-  }
-}*/
