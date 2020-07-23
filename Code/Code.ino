@@ -28,6 +28,9 @@ unsigned short sample_num; // can store up to 65536 samples (to keep with 8.3 co
 // Timer Variables
 const unsigned int timer_period = 10; // Update once you decide on the hardware
 
+// LCD Display
+LiquidCrystal lcd(12, 11, 10, 5, 4, 3, 2);
+
 // State Machine Variables
 /*
 Bit 0 - controlling internal temp?
@@ -74,6 +77,10 @@ void setup() {
     err_factor[i] = 1 + duty_cyc/time_const[i];
   }
 
+  lcd.begin(20, 4);
+  lcd.noAutoscroll();
+  lcd.print(F("Initializing..."));
+
   // Attempts to initialize the SD card, and if it fails, stops the program.
   if (!SD.begin(chip_sel)) {
     while (1);
@@ -91,6 +98,9 @@ void setup() {
   Wire.begin();
   Wire.setClock(100000); // 100 kHz I2C clock speed
   while (start_flow_sensor()); // Wait for flow sensor to start up and receive its serial number
+
+  // Show the initial interface display
+  lcd_toplist();
 }
 
 void loop() {
@@ -110,12 +120,16 @@ void loop() {
         prgm_dir = SD.open(F("/programs")); // Opens the programs directory on the SD card.
         prgm_file = prgm_dir.openNextFile();
         flags = 0; // Clears both button flags so that no weird behavior arises from simultaneous button presses
+        lcd.clear();
+        lcd.print(F("Programs:"));
+        lcd.setCursor(0, 1);
+        lcd.print(prgm_file.name());
       }
       else if (bitRead(flags, 1)) { // Cycle to "Status" in top list
         UI_loc[0] = 2;
         flags = 0;
+        lcd_cyclelist(0, 1);
       }
-      // Display "Programs" highlighted and "Status" not.
     }
     else if (!prgm_file) { // "Return" is selected in program list
       if (bitRead(flags, 0)) { // Move back to top list
@@ -123,12 +137,17 @@ void loop() {
         prgm_file.close();
         prgm_dir.close();
         flags = 0;
+        lcd_toplist();
       }
       else if (bitRead(flags, 1)) { // Cycle to first program in program list
         UI_loc[1] = 1;
         prgm_dir.rewindDirectory();
         prgm_file = prgm_dir.openNextFile();
         flags = 0;
+        lcd.clear();
+        lcd.print(F("Programs:"));
+        lcd.setCursor(0, 1);
+        lcd.print(prgm_file.name());
       }
     }
     else {
@@ -158,12 +177,31 @@ void loop() {
           states = B101011;
           UI_loc[2] = 1;
           flags = 0;
+          //LCD
         }
         else if (bitRead(flags, 1)) { // Cycle to next program in program list
           UI_loc[1]++;
           prgm_file.close();
           prgm_file = prgm_dir.openNextFile();
           flags = 0;
+          if (prgm_file) {
+            lcd.setCursor(0, 1);
+            String write_str = prgm_file.name();
+            lcd.print(write_str);
+            byte name_len = write_str.length();
+            if (name_len < 20) { // Clear any residual characters past the printed name
+              write_str = "";
+              for (byte i = 0; i < 20-name_len; i++) {
+                write_str += " ";
+              }
+              lcd.setCursor(name_len, 1)
+              lcd.print(write_str);
+            }
+          }
+          else { // The last program file was selected; print the option to return to the top list
+            lcd.clear();
+            lcd.print(F("Return"));
+          }
         }
       }
       else {
@@ -174,6 +212,10 @@ void loop() {
             MV[3] = 0;
             UI_loc[3] = 1;
             flags = 0;
+            lcd.clear();
+            lcd.print(F("*Finish"));
+            lcd.setCursor(0, 1);
+            lcd.print(F(" Resume"));
           }
           else if (bitRead(flags, 1)) { // Cycle to next run status display in run status list
             if (UI_loc[2] < 3) {
@@ -183,11 +225,12 @@ void loop() {
               UI_loc[2] = 1;
             }
             flags = 0;
+            //LCD
           }
           else {
             switch (UI_loc[2]) {
             case 1: // Run status display 1 is selected in run status list
-              
+              //LCD
               break;
             case 2: // Run status display 2 is selected in run status list
               
@@ -205,6 +248,7 @@ void loop() {
               UI_loc[3] = 0;
               UI_loc[2] = 0;
               UI_loc[1] = 0;
+              lcd_toplist();
             }
             else if (states == B101011 && abs(CV[0] - setpoint[0]) < 1) { // If the system is cooling to start flow, is not paused, and has reached temp setpoint (to within one degree), switch flow on once temp hits setpoint
               // Read all the sensor data to log once
@@ -236,20 +280,24 @@ void loop() {
             UI_loc[2] = 0;
             UI_loc[1] = 0;
             flags = 0;
+            lcd_toplist();
           }
           else if (bitRead(flags, 1)) { // Cycle to "Resume" in paused run list
             UI_loc[3] = 2;
             flags = 0;
+            lcd_cyclelist(0, 1);
           }
           break;
         case 2: // "Resume" is selected in paused run list
           if (bitRead(flags, 0)) { // Move back to run status list to continue flow. The flow control and data log bits will be set once the temp setpoint is reached (may be on the next loop if paused during flow), and the log_once_data will be written again.
             UI_loc[3] = 0;
             flags = 0;
+            //LCD
           }
           if (bitRead(flags, 1)) { // Cycle to "Finish" in paused run list
             UI_loc[3] = 1;
             flags = 0;
+            lcd_cyclelist(1, 0);
           }
           break;
         }
@@ -261,10 +309,12 @@ void loop() {
       if (bitRead(flags, 0)) { // Move into status list
         UI_loc[1] = 1;
         flags = 0;
+        //LCD
       }
       if (bitRead(flags, 1)) { // Cycle to "Programs" in top list
         UI_loc[0] = 1;
         flags = 0;
+        lcd_cyclelist(1, 0);
       }
     }
     else { // A status display is selected in status list
@@ -272,24 +322,28 @@ void loop() {
         UI_loc[1] = 0;
         UI_loc[0] = 1;
         flags = 0;
+        lcd_toplist();
       }
       switch (UI_loc[1]) {
       case 1: // Status display 1 is selected in status list
         if (bitRead(flags, 1)) { // Cycle to next status display in status list
           UI_loc[1]++;
           flags = 0;
+          //LCD
         }
         break;
       case 2: // Status display 2 is selected in status list
         if (bitRead(flags, 1)) { // Cycle to next status display in status list
           UI_loc[1]++;
           flags = 0;
+          //LCD
         }
         break;
       case 3: // The final status display is selected in status list
         if (bitRead(flags, 1)) { // Cycle to first status display in status list
           UI_loc[1] = 1;
           flags = 0;
+          //LCD
         }
         break;
       }
@@ -447,6 +501,20 @@ byte num_files(File dir) {
     dir_file = dir.openNextFile();
   }
   return num;
+}
+
+void lcd_toplist() {
+  lcd.clear();
+  lcd.print(F("*Programs"));
+  lcd.setCursor(0, 1);
+  lcd.print(F(" Status"));
+}
+
+void lcd_cyclelist(byte current, byte next) {
+  lcd.setCursor(0, current);
+  lcd.print(F(" "));
+  lcd.setCursor(0, next);
+  lcd.print(F("*"));
 }
 
 // Loop state switch
