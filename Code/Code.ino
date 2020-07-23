@@ -23,7 +23,7 @@ File data_file;
 File prgm_file;
 File prgm_dir;
 //byte prgm_num;
-byte sample_num; // can store up to 256 samples 
+unsigned short sample_num; // can store up to 65536 samples (to keep with 8.3 convention, files are named samXXXXX.csv)
 
 // Timer Variables
 const unsigned int timer_period = 10; // Update once you decide on the hardware
@@ -210,7 +210,7 @@ void loop() {
               // Read all the sensor data to log once
               read_GPS();
               if (!data_file) { // If the data file hasn't been opened
-                data_file = SD.open(String(F("/data/sample")) + String(sample_num) + String(F(".csv")), FILE_WRITE); // Open a new data file for writing
+                data_file = SD.open(String(F("/data/sam")) + String(sample_num) + String(F(".csv")), FILE_WRITE); // Open a new data file for writing
               }
               // Write log_once_data to data file
               // Construct a comma-separated string containing the sensor data
