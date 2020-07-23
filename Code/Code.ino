@@ -12,16 +12,18 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <SD.h>
+#include <LiquidCrystal.h>
 
 // Variables ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 // SD Card Variables
+// Use a FAT16 formatted card
 const byte chip_sel = 4; // The SPI selection pin for the SD card
-volatile File data_file;
-volatile File prgm_file;
-volatile File prgm_dir;
+File data_file;
+File prgm_file;
+File prgm_dir;
 //byte prgm_num;
-volatile unsigned int sample_num;
+byte sample_num; // can store up to 256 samples 
 
 // Timer Variables
 const unsigned int timer_period = 10; // Update once you decide on the hardware
@@ -41,26 +43,26 @@ B001011: controlling temperatures
 B101011: controlling temperatures during a run
 B111111: controlling temperatures and flow and recording data during a run
 */
-volatile byte states = 0;
-volatile byte UI_loc[] = {1, 0, 0, 0}; // Keeps track of where the user is currently in the interface
+byte states = 0;
+byte UI_loc[] = {1, 0, 0, 0}; // Keeps track of where the user is currently in the interface
 volatile byte flags = 0; // Bit 0 - select flag, Bit 1 - cycle flag
 
 // Controller Variables
 const byte ctrlr_num = 3;
 volatile byte ctrlr_sel = 0;
 int duty_cyc;
-int gain[] = {0, 0, 0}; // Configure these with lab measurements, assign units
-unsigned int time_const[] = {0, 0, 0}; // Configure these with lab measurements, assign units
-float err_factor[ctrlr_sel];
-volatile float CV[ctrlr_sel];
-volatile float err[ctrlr_sel];
-volatile float MV[ctrlr_sel];
+float gain[] = {0.0, 0.0, 0.0}; // Configure these with lab measurements, assign units
+float time_const[] = {0.0, 0.0, 0.0}; // Configure these with lab measurements, assign units
+float err_factor[3];
+volatile float CV[3];
+volatile float err[3];
+volatile float MV[3];
 volatile float flow_tot;
 volatile float log_data[3]; // ambient temp, ambient humidity, ambient pressure
 float log_once_data[3]; // latitude, longitude, time
-volatile float monitor_data[1]; // battery charge
-volatile float setpoint[] = {-10.0, 60.0, 100.0, 500.0}; // *C, *C, mL/min, mL; configured in settings. internal temp, heatsink temp, capillary flow, and total flow setpoints
-
+float monitor_data[1]; // battery charge
+float setpoint[] = {-10.0, 60.0, 100.0, 500.0}; // *C, *C, mL/min, mL; configured in settings. internal temp, heatsink temp, capillary flow, and total flow setpoints
+// If you change the size of CV, log_data, log_once_data, or setpoint, you need to change the bounds of the for loops that iterate over them below!
 
 // Program Control ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -69,7 +71,7 @@ void setup() {
   // Controller setup calculations
   duty_cyc = ctrlr_num*timer_period; // Controller duty cycle - the interval between reading data points
   for (byte i = 0; i < ctrlr_num; i++) {
-    err_factor[i] = 1 + duty_cyc/(float)time_const[i];
+    err_factor[i] = 1 + duty_cyc/time_const[i];
   }
 
   // Attempts to initialize the SD card, and if it fails, stops the program.
@@ -77,9 +79,9 @@ void setup() {
     while (1);
   }
   
-  prgm_dir = SD.open(F("/programs")); // Opens the programs directory on the SD card.
+  //prgm_dir = SD.open(F("/programs")); // Opens the programs directory on the SD card.
   //prgm_num = num_files(prgm_dir); // Counts the number of files in the programs directory, excluding subdirectories, to determine how many program options to display
-  prgm_dir.close();
+  //prgm_dir.close();
   
   File data_dir = SD.open(F("/data"));
   sample_num = num_files(data_dir); // Counts the number of files in the data directory, excluding subdirectories, to determine where to start numbering new data files
@@ -107,25 +109,26 @@ void loop() {
         UI_loc[1] = 1;
         prgm_dir = SD.open(F("/programs")); // Opens the programs directory on the SD card.
         prgm_file = prgm_dir.openNextFile();
-        bitClear(flags, 0);
+        flags = 0; // Clears both button flags so that no weird behavior arises from simultaneous button presses
       }
-      if (bitRead(flags, 1)) { // Cycle to "Status" in top list
+      else if (bitRead(flags, 1)) { // Cycle to "Status" in top list
         UI_loc[0] = 2;
-        bitClear(flags, 1);
+        flags = 0;
       }
+      // Display "Programs" highlighted and "Status" not.
     }
     else if (!prgm_file) { // "Return" is selected in program list
       if (bitRead(flags, 0)) { // Move back to top list
         UI_loc[1] = 0;
         prgm_file.close();
         prgm_dir.close();
-        bitClear(flags, 0);
+        flags = 0;
       }
-      if (bitRead(flags, 1)) { // Cycle to first program in program list
+      else if (bitRead(flags, 1)) { // Cycle to first program in program list
         UI_loc[1] = 1;
         prgm_dir.rewindDirectory();
         prgm_file = prgm_dir.openNextFile();
-        bitClear(flags, 1);
+        flags = 0;
       }
     }
     else {
@@ -142,7 +145,7 @@ void loop() {
             else {
               setpoint[setting_sel] = setting_str.toFloat();
               setting_str = "";
-              if (setting_sel < sizeof(setpoint)) {
+              if (setting_sel < 3) { // CHANGE IF YOU CHANGE THE SIZE OF setpoint
                 setting_sel++;
               }
               else {
@@ -154,12 +157,13 @@ void loop() {
           prgm_dir.close();
           states = B101011;
           UI_loc[2] = 1;
-          bitClear(flags, 0);
+          flags = 0;
         }
-        if (bitRead(flags, 1)) { // Cycle to next program in program list
+        else if (bitRead(flags, 1)) { // Cycle to next program in program list
           UI_loc[1]++;
+          prgm_file.close();
           prgm_file = prgm_dir.openNextFile();
-          bitClear(flags, 1);
+          flags = 0;
         }
       }
       else {
@@ -169,29 +173,61 @@ void loop() {
             states = B101011;
             MV[3] = 0;
             UI_loc[3] = 1;
-            bitClear(flags, 0);
+            flags = 0;
           }
-          switch (UI_loc[2]) {
-          case 1: // Run status display 1 is selected in run status list
-            if (bitRead(flags, 1)) { // Cycle to next run status display in run status list
+          else if (bitRead(flags, 1)) { // Cycle to next run status display in run status list
+            if (UI_loc[2] < 3) {
               UI_loc[2]++;
-              bitClear(flags, 1);
             }
-            break;
-          case 2: // Run status display 2 is selected in run status list
-            if (bitRead(flags, 1)) { // Cycle to next run status display in run status list
-              UI_loc[2]++;
-              bitClear(flags, 1);
-            }
-            break;
-          case 3: // The final run status display is selected in run status list
-            if (bitRead(flags, 1)) { // Cycle to first run status display in run status list
+            else {
               UI_loc[2] = 1;
-              bitClear(flags, 1);
             }
-            break;
+            flags = 0;
           }
-          if (states == B111111 && flow_tot >= setpoint[ctrlr_num]) { // If the system is currently sampling, is not paused, and has reached the total flow setpoint, stop run once total flow reaches configured value
+          else {
+            switch (UI_loc[2]) {
+            case 1: // Run status display 1 is selected in run status list
+              
+              break;
+            case 2: // Run status display 2 is selected in run status list
+              
+              break;
+            case 3: // The final run status display is selected in run status list
+              
+              break;
+            }
+            if (states == B111111 && flow_tot >= setpoint[ctrlr_num]) { // If the system is currently sampling, is not paused, and has reached the total flow setpoint, stop run once total flow reaches configured value
+              states = B001011;
+              MV[3] = 0;
+              data_file.close();
+              sample_num++; // Increment the collection counter
+              flow_tot = 0; // Reset the flow rate integration
+              UI_loc[3] = 0;
+              UI_loc[2] = 0;
+              UI_loc[1] = 0;
+            }
+            else if (states == B101011 && abs(CV[0] - setpoint[0]) < 1) { // If the system is cooling to start flow, is not paused, and has reached temp setpoint (to within one degree), switch flow on once temp hits setpoint
+              // Read all the sensor data to log once
+              read_GPS();
+              if (!data_file) { // If the data file hasn't been opened
+                data_file = SD.open(String(F("/data/sample")) + String(sample_num) + String(F(".csv")), FILE_WRITE); // Open a new data file for writing
+              }
+              // Write log_once_data to data file
+              // Construct a comma-separated string containing the sensor data
+              String data_str = "*"; // Starred data lines indicate they contain log_once_data
+              for (byte data_sel = 0; data_sel < 3; data_sel++) { // CHANGE IF YOU CHANGE THE SIZE OF log_once_data
+                data_str += String(log_once_data[data_sel]);
+                if (data_sel < 2) { // CHANGE IF YOU CHANGE THE SIZE OF log_once_data
+                  data_str += ",";
+                }
+              }
+              data_file.println(data_str + "\n"); // Write sensor data to current data file
+              states = B111111; // Start flow and recording data
+            }
+          }
+          break;
+        case 1: // "Finish" is selected in paused run list
+          if (bitRead(flags, 0)) { // Clear the run state bit, increment the sample counter, close the data file, and move back to top list
             states = B001011;
             data_file.close();
             sample_num++; // Increment the collection counter
@@ -199,47 +235,21 @@ void loop() {
             UI_loc[3] = 0;
             UI_loc[2] = 0;
             UI_loc[1] = 0;
+            flags = 0;
           }
-          else if (states == B101011 && abs(CV[0] - setpoint[0]) < 1) { // If the system is cooling to start flow, is not paused, and has reached temp setpoint (to within one degree), switch flow on once temp hits setpoint
-            // Read all the sensor data to log once
-            read_GPS();
-            data_file = SD.open(String(F("/data/sample")) + String(sample_num) + String(F(".csv")), FILE_WRITE); // Open a new data file for writing
-            // Write log_once_data to data file
-            // Construct a comma-separated string containing the sensor data
-            String sensor_data = "*"; // Starred data lines indicate they contain log_once_data
-            for (byte data_sel = 0; data_sel < sizeof(log_once_data); data_sel++) {
-              data_string += String(log_once_data[data_sel]);
-              if (data_sel < sizeof(log_once_data)-1) {
-                data_string += ",";
-              }
-            }
-            data_file.println(data_string + "\n"); // Write sensor data to current data file
-            states = B111111; // Start flow and recording data
-          }
-          break;
-        case 1: // "Finish" is selected in paused run list
-          if (bitRead(flags, 0)) { // Clear the run state bit, increment the sample counter, close the data file, and move back to top list
-            states = B001011;
-            sample_num++;
-            data_file.close();
-            UI_loc[3] = 0;
-            UI_loc[2] = 0;
-            UI_loc[1] = 0;
-            bitClear(flags, 0);
-          }
-          if (bitRead(flags, 1)) { // Cycle to "Resume" in paused run list
+          else if (bitRead(flags, 1)) { // Cycle to "Resume" in paused run list
             UI_loc[3] = 2;
-            bitClear(flags, 1);
+            flags = 0;
           }
           break;
         case 2: // "Resume" is selected in paused run list
           if (bitRead(flags, 0)) { // Move back to run status list to continue flow. The flow control and data log bits will be set once the temp setpoint is reached (may be on the next loop if paused during flow), and the log_once_data will be written again.
             UI_loc[3] = 0;
-            bitClear(flags, 0);
+            flags = 0;
           }
           if (bitRead(flags, 1)) { // Cycle to "Finish" in paused run list
             UI_loc[3] = 1;
-            bitClear(flags, 1);
+            flags = 0;
           }
           break;
         }
@@ -250,36 +260,36 @@ void loop() {
     if (UI_loc[1] == 0) { // "Status" is selected in top list
       if (bitRead(flags, 0)) { // Move into status list
         UI_loc[1] = 1;
-        bitClear(flags, 0);
+        flags = 0;
       }
       if (bitRead(flags, 1)) { // Cycle to "Programs" in top list
         UI_loc[0] = 1;
-        bitClear(flags, 1);
+        flags = 0;
       }
     }
     else { // A status display is selected in status list
       if (bitRead(flags, 0)) { // Move back to top list
         UI_loc[1] = 0;
         UI_loc[0] = 1;
-        bitClear(flags, 1);
+        flags = 0;
       }
       switch (UI_loc[1]) {
       case 1: // Status display 1 is selected in status list
         if (bitRead(flags, 1)) { // Cycle to next status display in status list
           UI_loc[1]++;
-          bitClear(flags, 1);
+          flags = 0;
         }
         break;
       case 2: // Status display 2 is selected in status list
         if (bitRead(flags, 1)) { // Cycle to next status display in status list
           UI_loc[1]++;
-          bitClear(flags, 1);
+          flags = 0;
         }
         break;
       case 3: // The final status display is selected in status list
         if (bitRead(flags, 1)) { // Cycle to first status display in status list
           UI_loc[1] = 1;
-          bitClear(flags, 1);
+          flags = 0;
         }
         break;
       }
@@ -333,17 +343,17 @@ void timer_ISR() {
     if (bitRead(states, 4)) { // If the data logging state is active, write sensor data to the SD card
 
       // Construct a comma-separated string containing the sensor data, both that involved in the control loops and that to log only
-      String sensor_data = "";
-      for (byte data_sel = 0; data_sel < sizeof(CV); data_sel++) {
-        data_string += String(CV[data_sel]) + ",";
+      String data_str = "";
+      for (byte data_sel = 0; data_sel < 3; data_sel++) { // CHANGE IF YOU CHANGE THE SIZE OF CV
+        data_str += String(CV[data_sel]) + ",";
       }
-      for (byte data_sel = 0; data_sel < sizeof(log_data); data_sel++) {
-        data_string += String(log_data[data_sel]);
-        if (data_sel < sizeof(log_data)-1) {
-          data_string += ",";
+      for (byte data_sel = 0; data_sel < 3; data_sel++) { // CHANGE IF YOU CHANGE THE SIZE OF log_data
+        data_str += String(log_data[data_sel]);
+        if (data_sel < 2) { // CHANGE IF YOU CHANGE THE SIZE OF log_data
+          data_str += ",";
         }
       }
-      data_file.println(data_string + "\n"); // Write sensor data to current data file
+      data_file.println(data_str + "\n"); // Write sensor data to current data file
     }
   }
 }
@@ -387,7 +397,7 @@ float read_sensor(byte selector) {
 }
 
 void read_temphumidity() {
-  // read into log_data[1:2]
+  // read into log_data[0:1]
 }
 
 void read_pressure() {
@@ -428,15 +438,13 @@ byte start_flow_sensor() {
 byte num_files(File dir) {
 
   byte num = 0;
-  while (true) {
-    File dirfile = dir.openNextFile();
-    if (!dirfile) {
-      break;
-    }
-    if (!dirfile.isDirectory()) {
+  File dir_file = dir.openNextFile();
+  while (dir_file) {
+    if (!dir_file.isDirectory()) {
       num++;
     }
-    dirfile.close();
+    dir_file.close();
+    dir_file = dir.openNextFile();
   }
   return num;
 }
