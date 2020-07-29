@@ -30,6 +30,8 @@ const unsigned int timer_period = 10; // Update once you decide on the hardware
 
 // LCD Display
 LiquidCrystal lcd(12, 11, 10, 5, 4, 3, 2);
+const byte lcd_col_num = 20;
+const byte lcd_row_num = 4;
 
 // State Machine Variables
 /*
@@ -65,7 +67,10 @@ volatile float log_data[3]; // ambient temp, ambient humidity, ambient pressure
 float log_once_data[3]; // latitude, longitude, time
 float monitor_data[1]; // battery charge
 float setpoint[] = {-10.0, 60.0, 100.0, 500.0}; // *C, *C, mL/min, mL; configured in settings. internal temp, heatsink temp, capillary flow, and total flow setpoints
-// If you change the size of CV, log_data, log_once_data, or setpoint, you need to change the bounds of the for loops that iterate over them below!
+// If you change the size of CV, log_data, log_once_data, or setpoint, you need to change these variables containing their sizes - they ensure the bounds of the for loops that iterate over them below are correct!
+const byte log_data_num = 3;
+const byte log_once_data_num = 3;
+const byte setpoint_num = 4;
 
 // Program Control ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -77,7 +82,7 @@ void setup() {
     err_factor[i] = 1 + duty_cyc/time_const[i];
   }
 
-  lcd.begin(20, 4);
+  lcd.begin(lcd_col_num, lcd_row_num);
   lcd.noAutoscroll();
   lcd.print(F("Initializing..."));
 
@@ -134,7 +139,6 @@ void loop() {
     else if (!prgm_file) { // "Return" is selected in program list
       if (bitRead(flags, 0)) { // Move back to top list
         UI_loc[1] = 0;
-        prgm_file.close();
         prgm_dir.close();
         flags = 0;
         lcd_toplist();
@@ -164,7 +168,7 @@ void loop() {
             else {
               setpoint[setting_sel] = setting_str.toFloat();
               setting_str = "";
-              if (setting_sel < 3) { // CHANGE IF YOU CHANGE THE SIZE OF setpoint
+              if (setting_sel < setpoint_num-1) {
                 setting_sel++;
               }
               else {
@@ -177,7 +181,7 @@ void loop() {
           states = B101011;
           UI_loc[2] = 1;
           flags = 0;
-          //LCD
+          lcd_status(UI_loc[2]); // Print the names for the first run status display
         }
         else if (bitRead(flags, 1)) { // Cycle to next program in program list
           UI_loc[1]++;
@@ -189,9 +193,9 @@ void loop() {
             String write_str = prgm_file.name();
             lcd.print(write_str);
             byte name_len = write_str.length();
-            if (name_len < 20) { // Clear any residual characters past the printed name
-              write_str = "";
-              for (byte i = 0; i < 20-name_len; i++) {
+            if (name_len < lcd_col_num) { // Clear any residual characters past the printed name
+              write_str = " ";
+              for (byte i = 0; i < lcd_col_num-name_len-1; i++) {
                 write_str += " ";
               }
               lcd.setCursor(name_len, 1)
@@ -225,25 +229,14 @@ void loop() {
               UI_loc[2] = 1;
             }
             flags = 0;
-            //LCD
+            lcd_status(UI_loc[2]); // Print the names for the next run status display
           }
           else {
-            switch (UI_loc[2]) {
-            case 1: // Run status display 1 is selected in run status list
-              //LCD
-              break;
-            case 2: // Run status display 2 is selected in run status list
-              
-              break;
-            case 3: // The final run status display is selected in run status list
-              
-              break;
-            }
+            lcd_status_vals(UI_loc[2]); // Update status values on the LCD
             if (states == B111111 && flow_tot >= setpoint[ctrlr_num]) { // If the system is currently sampling, is not paused, and has reached the total flow setpoint, stop run once total flow reaches configured value
               states = B001011;
               MV[3] = 0;
               data_file.close();
-              sample_num++; // Increment the collection counter
               flow_tot = 0; // Reset the flow rate integration
               UI_loc[3] = 0;
               UI_loc[2] = 0;
@@ -255,13 +248,14 @@ void loop() {
               read_GPS();
               if (!data_file) { // If the data file hasn't been opened
                 data_file = SD.open(String(F("/data/sam")) + String(sample_num) + String(F(".csv")), FILE_WRITE); // Open a new data file for writing
+                sample_num++; // Increment the collection counter
               }
               // Write log_once_data to data file
               // Construct a comma-separated string containing the sensor data
               String data_str = "*"; // Starred data lines indicate they contain log_once_data
-              for (byte data_sel = 0; data_sel < 3; data_sel++) { // CHANGE IF YOU CHANGE THE SIZE OF log_once_data
+              for (byte data_sel = 0; data_sel < log_once_data_num; data_sel++) {
                 data_str += String(log_once_data[data_sel]);
-                if (data_sel < 2) { // CHANGE IF YOU CHANGE THE SIZE OF log_once_data
+                if (data_sel < log_once_data_num-1) {
                   data_str += ",";
                 }
               }
@@ -274,7 +268,6 @@ void loop() {
           if (bitRead(flags, 0)) { // Clear the run state bit, increment the sample counter, close the data file, and move back to top list
             states = B001011;
             data_file.close();
-            sample_num++; // Increment the collection counter
             flow_tot = 0; // Reset the flow rate integration
             UI_loc[3] = 0;
             UI_loc[2] = 0;
@@ -292,7 +285,7 @@ void loop() {
           if (bitRead(flags, 0)) { // Move back to run status list to continue flow. The flow control and data log bits will be set once the temp setpoint is reached (may be on the next loop if paused during flow), and the log_once_data will be written again.
             UI_loc[3] = 0;
             flags = 0;
-            //LCD
+            lcd_status(UI_loc[2]);
           }
           if (bitRead(flags, 1)) { // Cycle to "Finish" in paused run list
             UI_loc[3] = 1;
@@ -309,7 +302,7 @@ void loop() {
       if (bitRead(flags, 0)) { // Move into status list
         UI_loc[1] = 1;
         flags = 0;
-        //LCD
+        lcd_status(UI_loc[1]);
       }
       if (bitRead(flags, 1)) { // Cycle to "Programs" in top list
         UI_loc[0] = 1;
@@ -324,28 +317,18 @@ void loop() {
         flags = 0;
         lcd_toplist();
       }
-      switch (UI_loc[1]) {
-      case 1: // Status display 1 is selected in status list
-        if (bitRead(flags, 1)) { // Cycle to next status display in status list
+      else if (bitRead(flags, 1)) { // Cycle to next status display in status list
+        if (UI_loc[1] < 3) {
           UI_loc[1]++;
-          flags = 0;
-          //LCD
         }
-        break;
-      case 2: // Status display 2 is selected in status list
-        if (bitRead(flags, 1)) { // Cycle to next status display in status list
-          UI_loc[1]++;
-          flags = 0;
-          //LCD
-        }
-        break;
-      case 3: // The final status display is selected in status list
-        if (bitRead(flags, 1)) { // Cycle to first status display in status list
+        else {
           UI_loc[1] = 1;
-          flags = 0;
-          //LCD
         }
-        break;
+        flags = 0;
+        lcd_status(UI_loc[1]);
+      }
+      else {
+        lcd_status_vals(UI_loc[1]);
       }
     }
     break;
@@ -398,12 +381,12 @@ void timer_ISR() {
 
       // Construct a comma-separated string containing the sensor data, both that involved in the control loops and that to log only
       String data_str = "";
-      for (byte data_sel = 0; data_sel < 3; data_sel++) { // CHANGE IF YOU CHANGE THE SIZE OF CV
+      for (byte data_sel = 0; data_sel < ctrlr_num; data_sel++) { // CHANGE if the size of CV is no longer ctrlr_num (which shouldn't happen)
         data_str += String(CV[data_sel]) + ",";
       }
-      for (byte data_sel = 0; data_sel < 3; data_sel++) { // CHANGE IF YOU CHANGE THE SIZE OF log_data
+      for (byte data_sel = 0; data_sel < log_data_num; data_sel++) {
         data_str += String(log_data[data_sel]);
-        if (data_sel < 2) { // CHANGE IF YOU CHANGE THE SIZE OF log_data
+        if (data_sel < log_data_num-1) {
           data_str += ",";
         }
       }
@@ -515,6 +498,75 @@ void lcd_cyclelist(byte current, byte next) {
   lcd.print(F(" "));
   lcd.setCursor(0, next);
   lcd.print(F("*"));
+}
+
+void lcd_status(byte screen) { // screen is 1-indexed so that it corresponds to UI_loc[2]
+  switch (screen) {
+  case 1: // Temps and flows
+    lcd.clear();
+    lcd.print(F("Internal Temp"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("External Temp"));
+    lcd.setCursor(0, 2);
+    lcd.print(F("Flow"));
+    lcd.setCursor(0, 3);
+    lcd.print(F("Total Flow"));
+    break;
+  case 2: // Setpoints
+    lcd.clear();
+    lcd.print(F("Int Temp Stpt"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Ext Temp Stpt"));
+    lcd.setCursor(0, 2);
+    lcd.print(F("Flow Stpt"));
+    lcd.setCursor(0, 3);
+    lcd.print(F("Tot Flow Stpt"));
+    break;
+  case 3: // Ambient conditions and data file number
+    lcd.clear();
+    lcd.print(F("Ambient Temp"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Pressure"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Humidity"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Sample Num"));
+    break;
+  }
+}
+void lcd_status_vals(byte screen) { // screen is 1-indexed so that it corresponds to UI_loc[2]
+  switch (screen) {
+  case 1: // Temps and setpoints
+    lcd.clear();
+    lcd.print(F("Capillary Temp"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("--Setpoint"));
+    lcd.setCursor(0, 2);
+    lcd.print(F("Heatsink Temp"));
+    lcd.setCursor(0, 3);
+    lcd.print(F("--Setpoint"));
+    break;
+  case 2: // Flows and setpoints
+    lcd.clear();
+    lcd.print(F("Capillary Flow"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("--Setpoint"));
+    lcd.setCursor(0, 2);
+    lcd.print(F("Total Flow"));
+    lcd.setCursor(0, 3);
+    lcd.print(F("--Setpoint"));
+    break;
+  case 3: // Ambient conditions and data file number
+    lcd.clear();
+    lcd.print(F("Ambient Temp"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Pressure"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Humidity"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Sample Num"));
+    break;
+  }
 }
 
 // Loop state switch
