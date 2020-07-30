@@ -1,11 +1,31 @@
 /*
  * Author: Adam Broerman
  * Portable DVME firmware written for Teensy 3.2
+ * Version: 0.15
+ * National Institute of Standards and Technology
+ * Fluid Characterization Group | Boulder, CO
 */
 
+/* Notes
+ *  Does not compile with the Teensy SD library. It must be deleted from hardware/teensy/avr/libraries.
+ */
+
+/* Resources
+ *  https://www.arduino.cc/reference/
+ *  http://gammon.com.au/interrupts
+ *  https://www.pjrc.com/teensy/teensy31.html
+ *  https://www.pjrc.com/teensy/pinout.html
+ *  https://www.pjrc.com/teensy/teensyduino.html
+ *  https://www.pjrc.com/teensy/td_libs.html
+ */
+
 /* TODO
-  Safety for when outputs are dangerously close to saturated
-  Design experiments to determine process gain and time constants, then to assign controller gain and time constants
+ *  Can potentially set CPU at a lower frequency to decrease power consumption
+ *  Can potentially switch to i2c_t3 library if more control over the sensor i2c communications is necessary
+ *  Can optimize by converting to integer math in the control loops
+ *  Potentially switch to char* instead of String() for stability concerns
+ *  Safety for when outputs are dangerously close to saturated
+ *  Design experiments to determine process gain and time constants, then to assign controller gain and time constants
 */
 
 #include <Wire.h>
@@ -106,7 +126,7 @@ const byte setpoint_num = 4;
 
 void setup() {
 
-  //Serial.begin(115200);
+  //Serial.begin(115200); // Debug interface
   Serial1.begin(9600); // Serial interface for GPS
 
   // The internal pullup resistors keep the interrupt pins high when they're not connected to anything.
