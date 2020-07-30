@@ -1,11 +1,10 @@
 /*
-
+ * Author: Adam Broerman
+ * Portable DVME firmware written for Teensy 3.2
 */
 
 /* TODO
-  Assign units to controller parameters
-  Develop conversions from controller units to actually control the inputs
-  Controller safety - if state or input is about to overflow
+  Safety for when outputs are dangerously close to saturated
   Design experiments to determine process gain and time constants, then to assign controller gain and time constants
 */
 
@@ -13,12 +12,37 @@
 #include <SPI.h>
 #include <SD.h>
 #include <LiquidCrystal.h>
+#include <TinyGPS.h>
+
+// Pinout ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+const byte sd_cs = 10; // The SPI selection pin for the SD card
+//const byte SD_MISO = 12; // Don't need to declare these
+//const byte SD_MOSI = 11;
+//const byte SD_SCK = 13;
+
+const byte lcd_rs = 2;
+const byte lcd_en = 3;
+const byte lcd_d4 = 4;
+const byte lcd_d5 = 5;
+const byte lcd_d6 = 6;
+const byte lcd_d7 = 7;
+
+const byte i2c_sda = 18;
+const byte i2c_scl = 19;
+
+const byte select_pin = 8;
+const byte cycle_pin = 9;
+
+const byte pwm_pin[] = {20, 21, 22};
+
+//const byte gps_rx = 0; // Don't need to declare these
+//const byte gps_tx = 1;
 
 // Variables ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 // SD Card Variables
 // Use a FAT16 formatted card
-const byte chip_sel = 4; // The SPI selection pin for the SD card
 File data_file;
 File prgm_file;
 File prgm_dir;
@@ -26,13 +50,18 @@ File prgm_dir;
 unsigned short sample_num; // can store up to 65536 samples (to keep with 8.3 convention, files are named samXXXXX.csv)
 
 // Timer Variables
-const unsigned int timer_period = 10; // Update once you decide on the hardware
+const unsigned int timer_period = 100000; // microseconds
+volatile byte timer_flag;
+IntervalTimer ctrlr_timer;
 
 // LCD Display
-LiquidCrystal lcd(12, 11, 10, 5, 4, 3, 2);
+LiquidCrystal lcd(lcd_rs, lcd_en, lcd_d4, lcd_d5, lcd_d6, lcd_d7);
 const byte lcd_col_num = 20;
 const byte lcd_row_num = 4;
-const byte degree[8] = {B01111, B01001, B01001, B01111, B00000, B00000, B00000, B00000};
+const byte degree_sym[8] = {B01111, B01001, B01001, B01111, B00000, B00000, B00000, B00000};
+
+// GPS
+TinyGPS gps;
 
 // State Machine Variables
 /*
@@ -55,17 +84,17 @@ volatile byte flags = B0100; // Bit 0 - select flag, Bit 1 - cycle flag, Bit 2 -
 
 // Controller Variables
 const byte ctrlr_num = 3;
-volatile byte ctrlr_sel = 0;
+byte ctrlr_sel = 0;
 int duty_cyc;
-float gain[] = {0.0, 0.0, 0.0}; // Configure these with lab measurements, assign units
+float ctrlr_gain[] = {0.0, 0.0, 0.0}; // Configure these with lab measurements, assign units
 float time_const[] = {0.0, 0.0, 0.0}; // Configure these with lab measurements, assign units
 float err_factor[3];
-volatile float CV[3];
-volatile float err[3];
-volatile float MV[3];
-volatile float flow_tot;
-volatile float log_data[3]; // ambient temp, ambient humidity, ambient pressure
-float log_once_data[3]; // latitude, longitude, time
+float CV[3];
+float err[3];
+float MV[3];
+float flow_tot;
+float log_data[3]; // ambient temp, ambient humidity, ambient pressure
+float log_once_data[3]; // latitude, longitude, UTC time
 float monitor_data[1]; // battery charge
 float setpoint[] = {-10.0, 60.0, 100.0, 500.0}; // *C, *C, mL/min, mL; configured in settings. internal temp, heatsink temp, capillary flow, and total flow setpoints
 // If you change the size of CV, log_data, log_once_data, or setpoint, you need to change these variables containing their sizes - they ensure the bounds of the for loops that iterate over them below are correct!
@@ -76,32 +105,42 @@ const byte setpoint_num = 4;
 // Program Control ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 void setup() {
+
+  //Serial.begin(115200);
+  Serial1.begin(9600); // Serial interface for GPS
+
+  // The internal pullup resistors keep the interrupt pins high when they're not connected to anything.
+  // When the button connects them to ground, they're pulled low, and that's detected by the falling ISR
+  pinMode(select_pin, INPUT_PULLUP);
+  pinMode(cycle_pin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(select_pin), select_ISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(cycle_pin), cycle_ISR, FALLING);
   
   // Controller setup calculations
   duty_cyc = ctrlr_num*timer_period; // Controller duty cycle - the interval between reading data points
   for (byte i = 0; i < ctrlr_num; i++) {
     err_factor[i] = 1 + duty_cyc/time_const[i];
+    pinMode(pwm_pin[i], OUTPUT);
   }
+  ctrlr_timer.begin(timer_ISR, timer_period);
 
   lcd.begin(lcd_col_num, lcd_row_num);
   lcd.noAutoscroll();
   lcd.print(F("Initializing..."));
-  lcd.createChar(0, degree);
+  lcd.createChar(0, degree_sym);
 
   // Attempts to initialize the SD card, and if it fails, stops the program.
-  if (!SD.begin(chip_sel)) {
+  if (!SD.begin(sd_cs)) {
     while (1);
   }
-  
-  //prgm_dir = SD.open(F("/programs")); // Opens the programs directory on the SD card.
-  //prgm_num = num_files(prgm_dir); // Counts the number of files in the programs directory, excluding subdirectories, to determine how many program options to display
-  //prgm_dir.close();
   
   File data_dir = SD.open(F("/data"));
   sample_num = num_files(data_dir); // Counts the number of files in the data directory, excluding subdirectories, to determine where to start numbering new data files
   data_dir.close();
 
   // Initialize I2C bus
+  Wire.setSDA(i2c_sda);
+  Wire.setSCL(i2c_scl);
   Wire.begin();
   Wire.setClock(100000); // 100 kHz I2C clock speed
   while (start_flow_sensor()); // Wait for flow sensor to start up and receive its serial number
@@ -109,7 +148,64 @@ void setup() {
 
 void loop() {
 
-  // TODO call flush() on the data file occasionally
+  if (timer_flag) { // If the timer has activated
+    
+    // If selected controller is active
+    if (bitRead(states, ctrlr_sel)) {
+      float CV_new = read_sensor(ctrlr_sel); // Read appropriate sensor to obtain current state
+      
+      // Velocity-mode PI control calculation
+      // Calculates the proper manipulation to bring the state into control with the setpoint
+      float err_new = setpoint[ctrlr_sel] - CV_new;
+      float MV_new = ctrlr_gain[ctrlr_sel]*(err_factor[ctrlr_sel]*err_new - err[ctrlr_sel]) + MV[ctrlr_sel];
+      
+      if (ctrlr_sel == 2) { // If the selected controller is for flow
+        flow_tot += duty_cyc*(CV_new + CV[2])/2; // Update the total flow counter while two consecutive flow data points are stored, using trapezoidal integration
+      }
+
+      // Update stored values for next calculation
+      CV[ctrlr_sel] = CV_new;
+      err[ctrlr_sel] = err_new;
+      MV[ctrlr_sel] = MV_new;
+
+      // Send the intervention calculated by the control loop as a PWM output to control power to each device.
+      // If you need a more complicated output here tailored for each control loop, switch to a function to which you pass ctrlr_sel, kinda like how read_sensors works.
+      // Select the gain value such that the range of the float is from 0 to 255.
+      analogWrite(pwm_pin[ctrlr_sel], round(MV_new));
+    }
+  
+    ctrlr_sel++; // Advances through the controllers each time this ISR is called
+  
+    // Distributes reading/writing tasks across the controller cycle
+    if (ctrlr_sel == 1 && bitRead(states, 4)) { // Write data to the SD card, if the recording data state is active
+      data_file.flush();
+    }
+    else if (ctrlr_sel == 2 && bitRead(states, 3)) { // Read the other sensors not involved in the control loops, if the reading other sensors state is active
+      read_temphumidity();
+      read_pressure();
+    }
+    else if (ctrlr_sel == ctrlr_num) {
+      ctrlr_sel = 0;
+      
+      if (bitRead(states, 4)) { // If the data logging state is active, write sensor data to the SD card
+  
+        // Construct a comma-separated string containing the sensor data, both that involved in the control loops and that to log only
+        String data_str = "";
+        for (byte data_sel = 0; data_sel < ctrlr_num; data_sel++) { // CHANGE if the size of CV is no longer ctrlr_num (which shouldn't happen)
+          data_str += String(CV[data_sel]) + ",";
+        }
+        for (byte data_sel = 0; data_sel < log_data_num; data_sel++) {
+          data_str += String(log_data[data_sel]);
+          if (data_sel < log_data_num-1) {
+            data_str += ",";
+          }
+        }
+        data_file.println(data_str + "\n"); // Write sensor data to current data file
+      }
+    }
+    
+    timer_flag = 0;
+  }
   
   // This massive conditional tree takes the program to a unique place in the code dependent on the current state, which is determined by the UI_loc, states, flags, and prgm_file variables.
   // If values can change, it continuously updates the screen based on the current state.
@@ -257,7 +353,7 @@ void loop() {
       else { // Monitor whether flow limit or temp setpoint has been reached and update values on LCD
         if (states == B111111 && flow_tot >= setpoint[ctrlr_num]) { // If the system is currently sampling, is not paused, and has reached the total flow setpoint, stop run once total flow reaches configured value. Move to program list.
           states = B001011;
-          MV[3] = 0; // stop flow AFTER turning flow control off
+          MV[2] = 0; // stop flow AFTER turning flow control off
           data_file.close();
           flow_tot = 0; // Reset the flow rate integration
           UI_loc[0] = 0;
@@ -307,7 +403,7 @@ void loop() {
         }
         else { // "Finish" is selected; stop the run. Move to program list.
           states = B001011;
-          MV[3] = 0; // Just in case flags(0) gets set in between flags(2) getting set and performing the flags(2) actions for UI_loc[0]==3. It shouldn't happen due to the if statements within the ISRs, but it's good to be careful.
+          MV[2] = 0; // Just in case flags(0) gets set in between flags(2) getting set and performing the flags(2) actions for UI_loc[0]==3. It shouldn't happen due to the if statements within the ISRs, but it's good to be careful.
           data_file.close();
           flow_tot = 0; // Reset the flow rate integration
           UI_loc[0] = 0;
@@ -320,7 +416,7 @@ void loop() {
       }
       else if (bitRead(flags, 2)) { // Set state to within run, but flow not controlled and not recording data. Stop flow.
         states = B101011;
-        MV[3] = 0; // stop flow AFTER turning flow control off
+        MV[2] = 0; // stop flow AFTER turning flow control off
         UI_loc[1] = 0;
         lcd.clear();
         lcd.print(F(" Finish"));
@@ -342,72 +438,19 @@ void loop() {
 
 // Interrupt on a timer
 void timer_ISR() {
-  
-  // If selected controller is active
-  if (bitRead(states, ctrlr_sel)) {
-    
-    // Read appropriate sensor to obtain current state
-    float CV_new = read_sensor(ctrlr_sel);
-    
-    // Velocity-mode PI control calculation
-    // Calculates the proper manipulation to bring the state into control with the setpoint
-    float err_new = setpoint[ctrlr_sel] - CV_new;
-    float MV_new = gain[ctrlr_sel]*(err_factor[ctrlr_sel]*err_new - err[ctrlr_sel]) + MV[ctrlr_sel]; // should perhaps cast this to a byte for PWM control, selecting the gain value such that the range of the float fits
-
-    if (ctrlr_sel == 2) { // If the selected controller is for flow
-      // Update the total flow counter while two consecutive flow data points are stored, using trapezoidal integration
-      flow_tot += duty_cyc*(CV_new + CV[2])/2;
-    }
-    
-    CV[ctrlr_sel] = CV_new;
-    err[ctrlr_sel] = err_new;
-    MV[ctrlr_sel] = MV_new;
-  }
-
-  ctrlr_sel++; // Advances through the controllers each time this ISR is called
-
-  // Distributes reading/writing tasks across the controller cycle
-  // On a controller cycle, read the other sensors not involved in the control loops, if the reading other sensors state is active
-  if (bitRead(states, 3)) {
-    if (ctrlr_sel == 1) {
-      read_temphumidity();
-    }
-    else if (ctrlr_sel == 2) {
-      read_pressure();
-    }
-  }
-  
-  if (ctrlr_sel == ctrlr_num) {
-    ctrlr_sel = 0;
-    
-    if (bitRead(states, 4)) { // If the data logging state is active, write sensor data to the SD card
-
-      // Construct a comma-separated string containing the sensor data, both that involved in the control loops and that to log only
-      String data_str = "";
-      for (byte data_sel = 0; data_sel < ctrlr_num; data_sel++) { // CHANGE if the size of CV is no longer ctrlr_num (which shouldn't happen)
-        data_str += String(CV[data_sel]) + ",";
-      }
-      for (byte data_sel = 0; data_sel < log_data_num; data_sel++) {
-        data_str += String(log_data[data_sel]);
-        if (data_sel < log_data_num-1) {
-          data_str += ",";
-        }
-      }
-      data_file.println(data_str + "\n"); // Write sensor data to current data file
-    }
-  }
+  timer_flag = 1;
 }
 
 // Interrupt for "Select" button
 void select_ISR() {
-  if (flags == 0) { // Prevents run-once actions (Bit 2) from not occurring due to an untimely select button press
+  if (flags == 0) { // Prevents required run-once actions (Bit 2) from not occurring due to an untimely select button press
     flags = B0001;
   }
 }
 
 // Interrupt for "Cycle" button
 void cycle_ISR() {
-  if (flags == 0) { // Prevents run-once actions (Bit 2) from not occurring due to an untimely cycle button press
+  if (flags == 0) { // Prevents required run-once actions (Bit 2) from not occurring due to an untimely cycle button press
     flags = B0010;
   }
 }
@@ -417,7 +460,7 @@ void cycle_ISR() {
 // Reads the sensor corresponding to the selected control loop and returns a value with the specified units: sccm currently
 float read_sensor(byte selector) {
   
-  float value;
+  float value = 0.0;
   switch (selector) {
     case 0: // Internal temp control
       // TODO
@@ -453,7 +496,7 @@ void read_GPS() {
 }
 
 void read_battery() {
-  // read into monitor_data
+  // TODO read into monitor_data
 }
 
 byte start_flow_sensor() {
@@ -467,13 +510,13 @@ byte start_flow_sensor() {
   // If the serial number was received on the last request, print it and read/print the rest of the serial number to prepare the device for receiving real data
   if (c[0] != 0) {
     Wire.requestFrom(0x49, 2);
-    Serial.print(F("Flow Sensor Serial Number: "));
-    Serial.print(c[0], HEX);
-    Serial.print(c[1], HEX);
+    //Serial.print(F("Flow Sensor Serial Number: "));
+    //Serial.print(c[0], HEX);
+    //Serial.print(c[1], HEX);
     c[0] = Wire.read();
     c[1] = Wire.read();
-    Serial.print(c[0], HEX);
-    Serial.println(c[1], HEX);
+    //Serial.print(c[0], HEX);
+    //Serial.println(c[1], HEX);
     return 0;
   }
   return 1;
