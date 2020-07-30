@@ -71,7 +71,7 @@ File prgm_dir;
 unsigned short sample_num; // can store up to 65536 samples (to keep with 8.3 convention, files are named samXXXXX.csv)
 
 // Timer Variables
-const unsigned int timer_period = 100000; // microseconds
+const unsigned int timer_period = 100; // milliseconds
 volatile byte timer_flag;
 IntervalTimer ctrlr_timer;
 
@@ -142,12 +142,12 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(cycle_pin), cycle_ISR, FALLING);
   
   // Controller setup calculations
-  duty_cyc = ctrlr_num*timer_period; // microseconds - controller duty cycle - the interval between reading data points
+  duty_cyc = ctrlr_num*timer_period; // milliseconds - controller duty cycle - the interval between reading data points
   for (byte i = 0; i < ctrlr_num; i++) {
     err_factor[i] = 1 + duty_cyc/time_const[i];
     pinMode(pwm_pin[i], OUTPUT);
   }
-  ctrlr_timer.begin(timer_ISR, timer_period);
+  ctrlr_timer.begin(timer_ISR, timer_period*1000);
 
   lcd.begin(lcd_col_num, lcd_row_num);
   lcd.noAutoscroll();
@@ -185,7 +185,7 @@ void loop() {
       float MV_new = ctrlr_gain[ctrlr_sel]*(err_factor[ctrlr_sel]*err_new - err[ctrlr_sel]) + MV[ctrlr_sel]; // Select the gain value such that the range of the float is from 0 to 255.
       
       if (ctrlr_sel == 2) { // If the selected controller is for flow
-        flow_tot += duty_cyc*(CV_new + CV[2])/120000000; // mL - Update the total flow counter while two consecutive flow data points are stored, using trapezoidal integration. duty_cyc*((CV_new + CV[2])/2)/((1000000 us/s)*(60 s/min))
+        flow_tot += duty_cyc*(CV_new + CV[2])/120000; // mL - Update the total flow counter while two consecutive flow data points are stored, using trapezoidal integration. duty_cyc*((CV_new + CV[2])/2)/((1000000 us/s)*(60 s/min))
       }
 
       // Update stored values for next calculation
