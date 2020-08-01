@@ -24,6 +24,7 @@
  *  Can potentially set CPU at a lower frequency to decrease power consumption
  *  Can potentially switch to i2c_t3 library if more control over the sensor i2c communications is necessary
  *  Can optimize by converting to integer math in the control loops
+ *  A control loop for the heatsink fan may be overkill. It may be most efficient to always run the fan at full to maximize heat dumped from the TEC hot side to maximize TEC efficiency, rather than trying to keep hot side and ambient temp difference at a setpoint. An easy way to hack this code to achieve this would be to set that temp difference setpoint to zero or even a negative value. But, for the most efficient code, that control loop should be removed entirely if it is deemed unnecessary.
  *  Potentially switch to char* instead of String() for stability concerns - use a 100 character read buffer or something
  *  Safety for when outputs are dangerously close to saturated
  *  Design experiments to determine process gain and time constants, then to assign controller gain and time constants
@@ -68,10 +69,10 @@ File data_file;
 File prgm_file;
 File prgm_dir;
 //byte prgm_num;
-unsigned short sample_num; // can store up to 65536 samples (to keep with 8.3 convention, files are named samXXXXX.csv)
+uint16_t sample_num; // can store up to 65536 samples (to keep with 8.3 convention, files are named samXXXXX.csv)
 
 // Timer Variables
-const unsigned int timer_period = 100; // milliseconds
+const unsigned int timer_period = 500; // milliseconds
 volatile byte timer_flag;
 IntervalTimer ctrlr_timer;
 
@@ -87,6 +88,8 @@ TinyGPS gps;
 // Sensors
 const byte flow_addr = 0x49;
 const byte pressure_addr = 0x28;
+const byte int_temp_addr = 0x18;
+const byte ext_tem_addr = 0x19;
 
 // State Machine Variables
 /*
@@ -121,7 +124,7 @@ float flow_tot;
 float log_data[3]; // ambient temp, ambient humidity, ambient pressure
 float log_once_data[3]; // latitude, longitude, UTC time
 float monitor_data[1]; // battery charge
-float setpoint[] = {-10.0, 60.0, 100.0, 500.0}; // *C, *C, mL/min, mL; configured in settings. internal temp, heatsink temp, capillary flow, and total flow setpoints
+float setpoint[] = {-10.0, 10.0, 100.0, 500.0}; // *C, *C, mL/min, mL; configured in settings. internal temp, heatsink temp, capillary flow, and total flow setpoints
 // If you change the size of CV, log_data, log_once_data, or setpoint, you need to change these variables containing their sizes - they ensure the bounds of the for loops that iterate over them below are correct!
 const byte log_data_num = 3;
 const byte log_once_data_num = 3;
@@ -177,7 +180,18 @@ void loop() {
     
     // If selected controller is active
     if (bitRead(states, ctrlr_sel)) {
-      float CV_new = read_sensor(ctrlr_sel); // Read appropriate sensor to obtain current state
+      float CV_new = 0.0;
+      switch (ctrlr_sel) { // Read appropriate sensor to obtain current state
+        case 0:
+          CV_new = read_temp(int_temp_addr);
+          break;
+        case 1:
+          CV_new = read_temp(ext_temp_addr) - log_data[0];
+          break;
+        case 2:
+          CV_new = read_flow();
+          break;
+      }
       
       // Velocity-mode PI control calculation
       // Calculates the proper manipulation to bring the state into control with the setpoint
@@ -201,12 +215,12 @@ void loop() {
     ctrlr_sel++; // Advances through the controllers each time this ISR is called
   
     // Distributes reading/writing tasks across the controller cycle
-    if (ctrlr_sel == 1 && bitRead(states, 4)) { // Write data to the SD card, if the recording data state is active
-      data_file.flush();
-    }
-    else if (ctrlr_sel == 2 && bitRead(states, 3)) { // Read the other sensors not involved in the control loops, if the reading other sensors state is active
-      read_temphumidity();
+    if (ctrlr_sel == 1 && bitRead(states, 3)) { // Read the other sensors not involved in the control loops, if the reading other sensors state is active
+      read_temphumidity(); // Read ambient temp right before the ext temp control loop for the most up-to-date value
       read_pressure();
+    }
+    else if (ctrlr_sel == 2 && bitRead(states, 4)) { // Write data to the SD card, if the recording data state is active
+      data_file.flush();
     }
     else if (ctrlr_sel == ctrlr_num) {
       ctrlr_sel = 0;
@@ -481,30 +495,29 @@ void cycle_ISR() {
 
 // Functions ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-// Reads the sensor corresponding to the selected control loop and returns a value with the specified units: sccm currently
-float read_sensor(byte selector) {
-  
-  float value = 0.0;
-  switch (selector) {
-    case 0: // Internal temp control
-      // TODO
-      break;
-    case 1: // Heatsink temp control
-       // TODO
-       // read temp difference between ambient air and heatsink base
-       //value = (heatsink temp) - log_data[0]
-      break;
-    case 2: // Flow control
-      Wire.requestFrom(flow_addr, 2);    // request 2 bytes from airflow sensor (address 0x49)
+// Adapted from the Adafruit MCP9808 library
+float read_temp(byte addr) {
+  float temp = 0.0;
+  uint16_t dout_code = read16(0x05, addr); // Read the temperature register
 
-      // Read the two bytes into a 16-bit datatype
-      short dout_code; // Okay to use a signed datatype here since the data is only 14-bit
-      dout_code = ((short)Wire.read()) << 8;
-      dout_code += (short)Wire.read();
-      value = (((float)dout_code/16383.0 - 0.5)/0.4)*200.0; // Multiply at end by full-scale flow (200 sccm I think for this sensor)
-      break;
+  if (dout_code != 0xFFFF) {
+    temp = dout_code & 0x0FFF;
+    temp /= 16.0;
+    if (dout_code & 0x1000)
+      temp -= 256;
   }
-  return value;
+
+  return temp;
+}
+
+float read_flow() {
+  Wire.requestFrom(flow_addr, 2);    // request 2 bytes from airflow sensor (address 0x49)
+  // Read the two bytes into a 16-bit datatype
+  uint16_t dout_code;
+  dout_code = Wire.read();
+  dout_code <<= 8;
+  dout_code += Wire.read();
+  return (((float)dout_code/16383.0 - 0.5)/0.4)*200.0; // Multiply at end by full-scale flow (200 sccm I think for this sensor)
 }
 
 void read_temphumidity() {
@@ -524,14 +537,25 @@ void read_battery() {
   // TODO read into monitor_data
 }
 
+// Adapted from the Adafruit MCP9808 library
+byte start_temp_sensor(byte addr) {
+  if (read16(0x06, addr) != 0x0054) { // Checks the manufacturer ID
+    return false;
+  }
+  if (read16(0x07, addr) != 0x0400) { // Checks the devide ID
+    return false;
+  }
+  // Default power-up resolution is 0.0625*C. If you want a lower resolution for faster read times, change here.
+  //write16(0x01, 0x0, addr); // Write 0 to the config register - unnecessary since it contains zero on startup.
+}
+
 byte start_flow_sensor() {
-  
   // Upon data requests, the airflow sensor will reply with zeros until it has initialized. Then it sends its serial number on the first two data requests afterward.
   Wire.requestFrom(flow_addr, 2);    // request 2 bytes from airflow sensor (address 0x49)
   byte c[2];
   c[0] = Wire.read();
   c[1] = Wire.read();
-
+  
   // If the serial number was received on the last request, print it and read/print the rest of the serial number to prepare the device for receiving real data
   if (c[0] != 0) {
     Wire.requestFrom(flow_addr, 2);
@@ -548,7 +572,6 @@ byte start_flow_sensor() {
 }
 
 byte num_files(File dir) {
-
   byte num = 0;
   File dir_file = dir.openNextFile();
   while (dir_file) {
@@ -559,4 +582,23 @@ byte num_files(File dir) {
     dir_file = dir.openNextFile();
   }
   return num;
+}
+
+// Adapted from the Adafruit MCP9808 library
+uint16_t read16(uint8_t reg, byte addr) {
+  uint16_t val = 0xFFFF;
+  uint8_t state;
+
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  state = Wire.endTransmission();
+
+  if (state == 0) {
+    Wire.requestFrom(addr, 2);
+    val = Wire.read();
+    val <<= 8;
+    val |= Wire.read();
+  }
+
+  return val;
 }
