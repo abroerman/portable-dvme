@@ -24,8 +24,8 @@
  *  Can potentially set CPU at a lower frequency to decrease power consumption
  *  Can potentially switch to i2c_t3 library if more control over the sensor i2c communications is necessary
  *  Can optimize by converting to integer math in the control loops
- *  A control loop for the heatsink fan may be overkill. It may be most efficient to always run the fan at full to maximize heat dumped from the TEC hot side to maximize TEC efficiency, rather than trying to keep hot side and ambient temp difference at a setpoint. An easy way to hack this code to achieve this would be to set that temp difference setpoint to zero or even a negative value. But, for the most efficient code, that control loop should be removed entirely if it is deemed unnecessary.
- *  Potentially switch to char* instead of String() for stability concerns - use a 100 character read buffer or something
+ *  A control loop for the heatsink fan may be overkill. It may be most efficient to always run the fan at full to maximize heat dumped from the TEC hot side to maximize TEC efficiency, rather than trying to keep hot side and ambient temp difference at a setpoint. An easy way to hack this code to achieve this would be to set that temp difference setpoint to zero or even a negative value. But, for the most efficient code, that control loop should be removed entirely if it is deemed unnecessary. You can use the built-in alert system in the MCP9808 with an interrupt to detect if the fan needs to come on.
+ *  Potentially switch to char* instead of String() for stability concerns - use a 100 character buffer or something
  *  Safety for when outputs are dangerously close to saturated
  *  Design experiments to determine process gain and time constants, then to assign controller gain and time constants
 */
@@ -87,9 +87,10 @@ TinyGPS gps;
 
 // Sensors
 const byte flow_addr = 0x49;
+const byte temphumidity_addr = 0x44;
 const byte pressure_addr = 0x28;
+const byte ext_temp_addr = 0x19;
 const byte int_temp_addr = 0x18;
-const byte ext_tem_addr = 0x19;
 
 // State Machine Variables
 /*
@@ -135,6 +136,12 @@ const byte setpoint_num = 4;
 void setup() {
 
   //Serial.begin(115200); // Debug interface
+
+  lcd.begin(lcd_col_num, lcd_row_num);
+  lcd.noAutoscroll();
+  lcd.print(F("Initializing..."));
+  lcd.createChar(0, degree_sym);
+  
   Serial1.begin(9600); // Serial interface for GPS
 
   // The internal pullup resistors keep the interrupt pins high when they're not connected to anything.
@@ -143,19 +150,6 @@ void setup() {
   pinMode(cycle_pin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(select_pin), select_ISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(cycle_pin), cycle_ISR, FALLING);
-  
-  // Controller setup calculations
-  duty_cyc = ctrlr_num*timer_period; // milliseconds - controller duty cycle - the interval between reading data points
-  for (byte i = 0; i < ctrlr_num; i++) {
-    err_factor[i] = 1 + duty_cyc/time_const[i];
-    pinMode(pwm_pin[i], OUTPUT);
-  }
-  ctrlr_timer.begin(timer_ISR, timer_period*1000);
-
-  lcd.begin(lcd_col_num, lcd_row_num);
-  lcd.noAutoscroll();
-  lcd.print(F("Initializing..."));
-  lcd.createChar(0, degree_sym);
 
   // Attempts to initialize the SD card, and if it fails, stops the program.
   if (!SD.begin(sd_cs)) {
@@ -172,6 +166,20 @@ void setup() {
   Wire.begin();
   Wire.setClock(100000); // 100 kHz I2C clock speed
   while (start_flow_sensor()); // Wait for flow sensor to start up and receive its serial number
+  if (!start_temp_sensor(int_temp_addr)) { // start internal temp sensor
+    while(1);
+  }
+  if (!start_temp_sensor(ext_temp_addr)) { // start external temp sensor
+    while(1);
+  }
+  
+  // Controller setup calculations
+  duty_cyc = ctrlr_num*timer_period; // milliseconds - controller duty cycle - the interval between reading data points
+  for (byte i = 0; i < ctrlr_num; i++) {
+    err_factor[i] = 1 + duty_cyc/time_const[i];
+    pinMode(pwm_pin[i], OUTPUT);
+  }
+  ctrlr_timer.begin(timer_ISR, timer_period*1000);
 }
 
 void loop() {
@@ -186,7 +194,7 @@ void loop() {
           CV_new = read_temp(int_temp_addr);
           break;
         case 1:
-          CV_new = read_temp(ext_temp_addr) - log_data[0];
+          CV_new = read_temp(ext_temp_addr) - log_data[0]; // controlled variable is the temperature DIFFERENCE between TEC hot side and ambient air, since ambient air is what's cooling the TEC hot side.
           break;
         case 2:
           CV_new = read_flow();
@@ -219,9 +227,6 @@ void loop() {
       read_temphumidity(); // Read ambient temp right before the ext temp control loop for the most up-to-date value
       read_pressure();
     }
-    else if (ctrlr_sel == 2 && bitRead(states, 4)) { // Write data to the SD card, if the recording data state is active
-      data_file.flush();
-    }
     else if (ctrlr_sel == ctrlr_num) {
       ctrlr_sel = 0;
       
@@ -230,16 +235,17 @@ void loop() {
         // Construct a comma-separated string containing the sensor data, both that involved in the control loops and that to log only
         String data_str = "";
         for (byte data_sel = 0; data_sel < ctrlr_num; data_sel++) { // CHANGE if the size of CV is no longer ctrlr_num (which shouldn't happen)
-          data_str += String(CV[data_sel]) + ",";
+          data_str += String(CV[data_sel], 3) + ",";
         }
         for (byte data_sel = 0; data_sel < log_data_num; data_sel++) {
-          data_str += String(log_data[data_sel]);
+          data_str += String(log_data[data_sel], 3);
           if (data_sel < log_data_num-1) {
             data_str += ",";
           }
         }
         data_file.println(data_str + "\n"); // Write sensor data to current data file
       }
+      data_file.flush();
     }
     
     timer_flag = 0;
@@ -359,7 +365,7 @@ void loop() {
           lcd.setCursor(18, 0);
           lcd.write(byte(0)); // Write the custom degree character
           lcd.setCursor(0, 1);
-          lcd.print(F("Humidity           %")); // TODO units
+          lcd.print(F("Humidity           %"));
           lcd.setCursor(0, 2);
           lcd.print(F("Pressure         kPa"));
           lcd.setCursor(0, 3);
@@ -415,7 +421,7 @@ void loop() {
         if (UI_loc[1]) {
           lcd.setCursor(13, 0);
           lcd.print(String(log_data[0], 1)); // Ambient temperature
-          lcd.setCursor(14, 1); // TODO Adjust if units are not %
+          lcd.setCursor(14, 1);
           lcd.print(String(log_data[1], 1)); // Humidity
           lcd.setCursor(10, 2);
           lcd.print(String(log_data[2], 3)); // Pressure
@@ -520,8 +526,45 @@ float read_flow() {
   return (((float)dout_code/16383.0 - 0.5)/0.4)*200.0; // Multiply at end by full-scale flow (200 sccm I think for this sensor)
 }
 
-void read_temphumidity() {
-  // read into log_data[0:1]
+// Adapted from the Adafruit SHT31 library
+bool read_temphumidity() {
+  uint8_t readbuffer[6];
+  uint8_t len = sizeof(readbuffer);
+
+  Wire.beginTransmission(temphumidity_addr); // Write the command to read with high reproducibility and clock stretch disabled
+  Wire.write(0x24);
+  Wire.write(0x00);
+  if (Wire.endTransmission()) { // return false if there was an error
+    return false;
+  }
+
+  delay(20);
+
+  size_t recv_num = Wire.requestFrom(temphumidity_addr, len);
+  if (recv_num != len) {
+    // Not enough data available to fulfill our obligation!
+    return false;
+  }
+  for (byte i = 0; i < len; i++) { // Read the returned data
+    readbuffer[i] = Wire.read();
+  }
+
+  // Not performing the CRC check here - refer to the Adafruit library for the code
+
+  // read into log_data[0:1], converting from the values in readbuffer
+  int32_t stemp = (int32_t)(((uint32_t)readbuffer[0] << 8) | readbuffer[1]);
+  // simplified (65536 instead of 65535) integer version of:
+  // temp = (stemp * 175.0f) / 65535.0f - 45.0f;
+  stemp = ((4375 * stemp) >> 14) - 4500;
+  log_data[0] = (float)stemp / 100.0f; // actual temp
+
+  uint32_t shum = ((uint32_t)readbuffer[3] << 8) | readbuffer[4];
+  // simplified (65536 instead of 65535) integer version of:
+  // humidity = (shum * 100.0f) / 65535.0f;
+  shum = (625 * shum) >> 12;
+  log_data[1] (float)shum / 100.0f; // actual humidity
+
+  return true;
 }
 
 void read_pressure() {
@@ -538,7 +581,7 @@ void read_battery() {
 }
 
 // Adapted from the Adafruit MCP9808 library
-byte start_temp_sensor(byte addr) {
+bool start_temp_sensor(byte addr) {
   if (read16(0x06, addr) != 0x0054) { // Checks the manufacturer ID
     return false;
   }
@@ -547,9 +590,10 @@ byte start_temp_sensor(byte addr) {
   }
   // Default power-up resolution is 0.0625*C. If you want a lower resolution for faster read times, change here.
   //write16(0x01, 0x0, addr); // Write 0 to the config register - unnecessary since it contains zero on startup.
+  return true;
 }
 
-byte start_flow_sensor() {
+bool start_flow_sensor() {
   // Upon data requests, the airflow sensor will reply with zeros until it has initialized. Then it sends its serial number on the first two data requests afterward.
   Wire.requestFrom(flow_addr, 2);    // request 2 bytes from airflow sensor (address 0x49)
   byte c[2];
@@ -566,9 +610,44 @@ byte start_flow_sensor() {
     c[1] = Wire.read();
     //Serial.print(c[0], HEX);
     //Serial.println(c[1], HEX);
-    return 0;
+    return false;
   }
-  return 1;
+  return true;
+}
+
+// Adapted from the Adafruit SHT31 library
+uint16_t start_temphumidity_sensor() {
+  Wire.beginTransmission(temphumidity_addr); // Write the command to soft reset
+  Wire.write(0x30);
+  Wire.write(0xA2);
+  if (Wire.endTransmission()) { // return false if there was an error
+    return false;
+  }
+  delay(10);
+  
+  uint8_t readbuffer[3];
+  uint8_t len = sizeof(readbuffer);
+  
+  Wire.beginTransmission(temphumidity_addr); // Write the command to read device status
+  Wire.write(0xF3);
+  Wire.write(0x2D);
+  if (Wire.endTransmission()) { // return false if there was an error
+    return false;
+  }
+
+  size_t recv_num = Wire.requestFrom(temphumidity_addr, len);
+  if (recv_num != len) {
+    // Not enough data available to fulfill our obligation!
+    return false;
+  }
+  for (byte i = 0; i < len; i++) { // Read the returned data
+    readbuffer[i] = Wire.read();
+  }
+
+  uint16_t stat = data[0];
+  stat <<= 8;
+  stat |= data[1];
+  return stat;
 }
 
 byte num_files(File dir) {
