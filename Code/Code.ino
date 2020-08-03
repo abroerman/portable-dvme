@@ -1,7 +1,7 @@
 /*
  * Author: Adam Broerman
  * Portable DVME firmware written for Teensy 3.2
- * Version: 0.15
+ * Version: 0.17
  * National Institute of Standards and Technology
  * Fluid Characterization Group | Boulder, CO
 */
@@ -621,6 +621,7 @@ bool start_flow_sensor() {
   
   // If the serial number was received on the last request, print it and read/print the rest of the serial number to prepare the device for receiving real data
   if (c[0] != 0) {
+    delay(10);
     Wire.requestFrom(flow_addr, (byte)2);
     //Serial.print(F("Flow Sensor Serial Number: "));
     //Serial.print(c[0], HEX);
