@@ -72,7 +72,7 @@ File prgm_dir;
 uint16_t sample_num; // can store up to 65536 samples (to keep with 8.3 convention, files are named samXXXXX.csv)
 
 // Timer Variables
-const unsigned int timer_period = 500; // milliseconds
+const unsigned int timer_period = 1000; // milliseconds
 volatile byte timer_flag;
 IntervalTimer ctrlr_timer;
 
@@ -122,13 +122,15 @@ float CV[3];
 float err[3];
 float MV[3];
 float flow_tot;
-float log_data[3]; // ambient temp, ambient humidity, ambient pressure
-float log_once_data[3]; // latitude, longitude, UTC time
+float log_data[3]; // ambient temp - *C, ambient humidity - %, ambient pressure - kPa
+float pos_data[2]; // latitude, longitude
+int year_data;
+byte time_data[5]; // month, day, hour, minute, second
 float monitor_data[1]; // battery charge
 float setpoint[] = {-10.0, 10.0, 100.0, 500.0}; // *C, *C, mL/min, mL; configured in settings. internal temp, heatsink temp, capillary flow, and total flow setpoints
 // If you change the size of CV, log_data, log_once_data, or setpoint, you need to change these variables containing their sizes - they ensure the bounds of the for loops that iterate over them below are correct!
 const byte log_data_num = 3;
-const byte log_once_data_num = 3;
+const byte time_data_num = 5;
 const byte setpoint_num = 4;
 
 // Program Control ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -165,13 +167,14 @@ void setup() {
   Wire.setSCL(i2c_scl);
   Wire.begin();
   Wire.setClock(100000); // 100 kHz I2C clock speed
-  while (start_flow_sensor()); // Wait for flow sensor to start up and receive its serial number
   if (!start_temp_sensor(int_temp_addr)) { // start internal temp sensor
     while(1);
   }
   if (!start_temp_sensor(ext_temp_addr)) { // start external temp sensor
     while(1);
   }
+  while (start_flow_sensor()); // Wait for flow sensor to start up and receive its serial number
+  start_temphumidity_sensor(); // start ambient temp and humidity sensor
   
   // Controller setup calculations
   duty_cyc = ctrlr_num*timer_period; // milliseconds - controller duty cycle - the interval between reading data points
@@ -406,14 +409,12 @@ void loop() {
         else if (states == B101011 && abs(CV[0] - setpoint[0]) < 1) { // If the system is cooling to start flow, is not paused, and has reached temp setpoint (to within one degree), switch flow on once temp hits setpoint
           // Read all the sensor data to log once
           read_GPS();
-          // Write log_once_data to data file
+          // Write position and time data to data file
+          data_file.println("*" + String(pos_data[0], 5) + "," + String(pos_data[1], 5) + "\n"); // Write position data to current data file. // Starred data lines indicate they contain position data
           // Construct a comma-separated string containing the sensor data
-          String data_str = "*"; // Starred data lines indicate they contain log_once_data
-          for (byte data_sel = 0; data_sel < log_once_data_num; data_sel++) {
-            data_str += String(log_once_data[data_sel]);
-            if (data_sel < log_once_data_num-1) {
-              data_str += ",";
-            }
+          String data_str = "$" + String(year_data); // Dollared data lines indicate they contain time data (time is money, friend!)
+          for (byte data_sel = 0; data_sel < time_data_num; data_sel++) {
+            data_str += "," + String(time_data[data_sel]);
           }
           data_file.println(data_str + "\n"); // Write sensor data to current data file
           states = B111111; // Start flow and recording data
@@ -538,7 +539,7 @@ bool read_temphumidity() {
     return false;
   }
 
-  delay(20);
+  delay(20); // wait for sensor reading
 
   size_t recv_num = Wire.requestFrom(temphumidity_addr, len);
   if (recv_num != len) {
@@ -562,18 +563,36 @@ bool read_temphumidity() {
   // simplified (65536 instead of 65535) integer version of:
   // humidity = (shum * 100.0f) / 65535.0f;
   shum = (625 * shum) >> 12;
-  log_data[1] (float)shum / 100.0f; // actual humidity
+  log_data[1] = (float)shum / 100.0f; // actual humidity
 
   return true;
 }
 
 void read_pressure() {
   // read into log_data[2]
+  Wire.requestFrom(pressure_addr, 2);    // request 2 bytes from pressure sensor (address 0x28)
+  // Read the two bytes into a 16-bit datatype
+  uint32_t dout_code;
+  dout_code = Wire.read();
+  dout_code <<= 8;
+  dout_code += Wire.read();
+  if (!bitRead(dout_code, 15)) { // If the data is not stale and the pressure sensor is not in a diagnostic condition
+    // integer math instead of (dout_code - 0.1f * 16384) * 206.843f / (0.8 * 16384)
+    dout_code = ((dout_code * 258553) >> 14) - 25855; // According to the i2c communication technical note, this may instead need to be dout_code = (dout_code * 206843) >> 14;
+    log_data[2] = (float)dout_code / 1000.0f; // actual pressure in kPa
+  }
 }
 
 void read_GPS() {
   // read into log_once_data
   // use TinyGPS library and examples
+  while (Serial1.available()) {
+    if (gps.encode(Serial1.read())) { // process gps messages
+      unsigned long fix_age;
+      gps.f_get_position(&pos_data[0], &pos_data[1], &fix_age);
+      gps.crack_datetime(&year_data, &time_data[0], &time_data[1], &time_data[2], &time_data[3], &time_data[4], NULL, &fix_age);
+    }
+  }
 }
 
 void read_battery() {
