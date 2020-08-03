@@ -518,7 +518,7 @@ float read_temp(byte addr) {
 }
 
 float read_flow() {
-  Wire.requestFrom(flow_addr, 2);    // request 2 bytes from airflow sensor (address 0x49)
+  Wire.requestFrom(flow_addr, (byte)2);    // request 2 bytes from airflow sensor (address 0x49)
   // Read the two bytes into a 16-bit datatype
   uint16_t dout_code;
   dout_code = Wire.read();
@@ -570,7 +570,7 @@ bool read_temphumidity() {
 
 void read_pressure() {
   // read into log_data[2]
-  Wire.requestFrom(pressure_addr, 2);    // request 2 bytes from pressure sensor (address 0x28)
+  Wire.requestFrom(pressure_addr, (byte)2);    // request 2 bytes from pressure sensor (address 0x28)
   // Read the two bytes into a 16-bit datatype
   uint32_t dout_code;
   dout_code = Wire.read();
@@ -614,14 +614,14 @@ bool start_temp_sensor(byte addr) {
 
 bool start_flow_sensor() {
   // Upon data requests, the airflow sensor will reply with zeros until it has initialized. Then it sends its serial number on the first two data requests afterward.
-  Wire.requestFrom(flow_addr, 2);    // request 2 bytes from airflow sensor (address 0x49)
+  Wire.requestFrom(flow_addr, (byte)2);    // request 2 bytes from airflow sensor (address 0x49)
   byte c[2];
   c[0] = Wire.read();
   c[1] = Wire.read();
   
   // If the serial number was received on the last request, print it and read/print the rest of the serial number to prepare the device for receiving real data
   if (c[0] != 0) {
-    Wire.requestFrom(flow_addr, 2);
+    Wire.requestFrom(flow_addr, (byte)2);
     //Serial.print(F("Flow Sensor Serial Number: "));
     //Serial.print(c[0], HEX);
     //Serial.print(c[1], HEX);
@@ -663,9 +663,9 @@ uint16_t start_temphumidity_sensor() {
     readbuffer[i] = Wire.read();
   }
 
-  uint16_t stat = data[0];
+  uint16_t stat = readbuffer[0];
   stat <<= 8;
-  stat |= data[1];
+  stat |= readbuffer[1];
   return stat;
 }
 
@@ -683,16 +683,14 @@ byte num_files(File dir) {
 }
 
 // Adapted from the Adafruit MCP9808 library
-uint16_t read16(uint8_t reg, byte addr) {
+uint16_t read16(uint8_t reg, uint8_t addr) {
   uint16_t val = 0xFFFF;
-  uint8_t state;
 
   Wire.beginTransmission(addr);
   Wire.write(reg);
-  state = Wire.endTransmission();
 
-  if (state == 0) {
-    Wire.requestFrom(addr, 2);
+  if (!Wire.endTransmission()) {
+    Wire.requestFrom(addr, (uint8_t)2);
     val = Wire.read();
     val <<= 8;
     val |= Wire.read();
