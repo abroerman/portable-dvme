@@ -127,7 +127,8 @@ float pos_data[2]; // latitude, longitude
 int year_data;
 byte time_data[5]; // month, day, hour, minute, second
 float monitor_data[1]; // battery charge
-float setpoint[] = {-10.0, 10.0, 100.0, 500.0}; // *C, *C, mL/min, mL; configured in settings. internal temp, heatsink temp, capillary flow, and total flow setpoints
+float setpoint[] = {-10.0, 10.0, 100.0, 500.0}; // *C, *C, sccm, scc; configured in settings. internal temp, heatsink temp, capillary flow, and total flow setpoints
+const byte temp_tol = 1; // *C - the tolerance within which the internal temperature must arrive to its setpoint in order to start flow
 // If you change the size of CV, log_data, log_once_data, or setpoint, you need to change these variables containing their sizes - they ensure the bounds of the for loops that iterate over them below are correct!
 const byte log_data_num = 3;
 const byte time_data_num = 5;
@@ -219,11 +220,11 @@ void loop() {
       MV[ctrlr_sel] = MV_new;
 
       // Send the intervention calculated by the control loop as a PWM output to control power to each device.
-      // If you need a more complicated output here tailored for each control loop, switch to a function to which you pass ctrlr_sel, kinda like how read_sensors works.
+      // If you need a more complicated output here tailored for each control loop, switch to a switch(case) to which you pass ctrlr_sel, kinda like how the sensor reading switch(case) works.
       analogWrite(pwm_pin[ctrlr_sel], round(MV_new));
     }
   
-    ctrlr_sel++; // Advances through the controllers each time this ISR is called
+    ctrlr_sel++; // Advances through the controllers each time the timer ISR is called
   
     // Distributes reading/writing tasks across the controller cycle
     if (ctrlr_sel == 1 && bitRead(states, 3)) { // Read the other sensors not involved in the control loops, if the reading other sensors state is active
@@ -248,7 +249,7 @@ void loop() {
         }
         data_file.println(data_str + "\n"); // Write sensor data to current data file
       }
-      data_file.flush();
+      data_file.flush(); // Physically write the data to the SD card
     }
     
     timer_flag = 0;
@@ -269,6 +270,18 @@ void loop() {
           }
           else {
             setpoint[setting_sel] = setting_str.toFloat();
+            
+            // Instead of the above line, may need to use the following to handle negative values; it's unclear from the documentation
+//            byte invert = 0;
+//            if (setting_str.charAt(0) == '-') {
+//              setting_str.remove(0, 1);
+//              invert = 1;
+//            }
+//            setpoint[setting_sel] = setting_str.toFloat();
+//            if (invert) {
+//              setpoint[setting_sel] = -setpoint[setting_sel];
+//            }
+            
             setting_str = "";
             if (setting_sel < setpoint_num-1) {
               setting_sel++;
@@ -305,6 +318,7 @@ void loop() {
         lcd.print(prgm_file.name());
         flags = 0;
       }
+      break;
       
     case 1: // Pre-run setpoint display - allows the user to preview the contents of the program before running it
       if (bitRead(flags, 0)) { // Move to the run status display and start the run. Set state to within run, awaiting internal temp to reach setpoint. Open the data file.
@@ -342,11 +356,12 @@ void loop() {
         lcd.setCursor(10, 2);
         lcd.print(String(setpoint[2], 2));
         lcd.setCursor(0, 3);
-        lcd.print(F("Stop Flow At      mL"));
-        lcd.setCursor(13, 3);
+        lcd.print(F("End Run At       scc"));
+        lcd.setCursor(12, 3);
         lcd.print(String(setpoint[3], 0));
         flags = 0;
       }
+      break;
       
     case 2: // Run status display
       if (bitRead(flags, 0)) { // Pause run and move to paused run list.
@@ -376,7 +391,7 @@ void loop() {
         }
         else {
           lcd.clear();
-          lcd.print(F("Internal      ,    C"));
+          lcd.print(F("Internal      ,    C")); // Perhaps convert to a forward slash instead of a comma for readability? Not sure how it'll show up on the LCD
           lcd.setCursor(15, 0);
           lcd.print(String(setpoint[0], 0));
           lcd.setCursor(18, 0);
@@ -392,7 +407,8 @@ void loop() {
           lcd.setCursor(13, 2);
           lcd.print(String(setpoint[2], 0));
           lcd.setCursor(0, 3);
-          lcd.print(F("Total       ,     mL"));
+          lcd.print(F("Total      ,     scc"));
+          lcd.setCursor(12, 2);
           lcd.print(String(setpoint[3], 0));
         }
         flags = 0;
@@ -406,7 +422,7 @@ void loop() {
           UI_loc[0] = 0;
           flags = B0100;
         }
-        else if (states == B101011 && abs(CV[0] - setpoint[0]) < 1) { // If the system is cooling to start flow, is not paused, and has reached temp setpoint (to within one degree), switch flow on once temp hits setpoint
+        else if (states == B101011 && abs(CV[0] - setpoint[0]) < temp_tol) { // If the system is cooling to start flow, is not paused, and has reached temp setpoint (to within one degree), switch flow on once temp hits setpoint
           // Read all the sensor data to log once
           read_GPS();
           // Write position and time data to data file
@@ -437,9 +453,10 @@ void loop() {
           lcd.setCursor(6, 2);
           lcd.print(String(CV[2], 2)); // Flow rate
           lcd.setCursor(7, 3);
-          lcd.print(String(flow_tot, 1)); // Total flow
+          lcd.print(String(flow_tot, 0)); // Total flow
         }
       }
+      break;
       
     case 3: // Paused run list
       if (bitRead(flags, 0)) { // Select option: either end the run or continue
@@ -476,6 +493,7 @@ void loop() {
         lcd.print(F(" "));
         flags = 0;
       }
+      break;
   }
 }
 
